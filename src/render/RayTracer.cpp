@@ -256,84 +256,106 @@ void RayTracer::createPipelines(VkFormat colorFormat)
     }
 
     // ---------------------------------------------------------------- tonemap
-    {
-        VkShaderModule vert = loadShader("tonemap.vert.spv");
-        VkShaderModule frag = loadShader("tonemap.frag.spv");
-
-        VkPipelineShaderStageCreateInfo stageInfos[2]{};
-        stageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        stageInfos[0].module = vert;
-        stageInfos[0].pName = "main";
-        stageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stageInfos[1].module = frag;
-        stageInfos[1].pName = "main";
-
-        VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-        VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-        viewportState.viewportCount = 1;
-        viewportState.scissorCount = 1;
-
-        VkPipelineRasterizationStateCreateInfo raster{
-            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-        raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode = VK_CULL_MODE_NONE;
-        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        raster.lineWidth = 1.0f;
-
-        VkPipelineMultisampleStateCreateInfo multisample{
-            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        VkPipelineDepthStencilStateCreateInfo depthStencil{
-            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-
-        VkPipelineColorBlendAttachmentState blendAttachment{};
-        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        blendAttachment.blendEnable = VK_FALSE;
-
-        VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        colorBlend.attachmentCount = 1;
-        colorBlend.pAttachments = &blendAttachment;
-
-        VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-        dynamicState.dynamicStateCount = 2;
-        dynamicState.pDynamicStates = dynamicStates;
-
-        VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachmentFormats = &colorFormat;
-
-        VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-        info.pNext = &renderingInfo;
-        info.stageCount = 2;
-        info.pStages = stageInfos;
-        info.pVertexInputState = &vertexInput;
-        info.pInputAssemblyState = &inputAssembly;
-        info.pViewportState = &viewportState;
-        info.pRasterizationState = &raster;
-        info.pMultisampleState = &multisample;
-        info.pDepthStencilState = &depthStencil;
-        info.pColorBlendState = &colorBlend;
-        info.pDynamicState = &dynamicState;
-        info.layout = m_pipelineLayout;
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &m_tonemapPipeline) != VK_SUCCESS)
-        {
-            RT_FATAL("Failed to create tonemap pipeline");
-        }
-
-        vkDestroyShaderModule(device, vert, nullptr);
-        vkDestroyShaderModule(device, frag, nullptr);
-    }
+    createTonemapPipeline(colorFormat);
 
     RT_LOG("Ray tracing backend: %s", backendName());
+}
+
+void RayTracer::createTonemapPipeline(VkFormat colorFormat)
+{
+    VkDevice device = m_context->device;
+
+    VkShaderModule vert = loadShader("tonemap.vert.spv");
+    VkShaderModule frag = loadShader("tonemap.frag.spv");
+
+    VkPipelineShaderStageCreateInfo stageInfos[2]{};
+    stageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stageInfos[0].module = vert;
+    stageInfos[0].pName = "main";
+    stageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stageInfos[1].module = frag;
+    stageInfos[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments = &blendAttachment;
+
+    VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
+
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.pNext = &renderingInfo;
+    info.stageCount = 2;
+    info.pStages = stageInfos;
+    info.pVertexInputState = &vertexInput;
+    info.pInputAssemblyState = &inputAssembly;
+    info.pViewportState = &viewportState;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depthStencil;
+    info.pColorBlendState = &colorBlend;
+    info.pDynamicState = &dynamicState;
+    info.layout = m_pipelineLayout;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &m_tonemapPipeline) != VK_SUCCESS)
+    {
+        RT_FATAL("Failed to create tonemap pipeline");
+    }
+
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+}
+
+void RayTracer::setColorFormat(VkFormat colorFormat)
+{
+    if (m_colorFormat == colorFormat && m_tonemapPipeline != VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    m_colorFormat = colorFormat;
+    if (m_tonemapPipeline != VK_NULL_HANDLE)
+    {
+        vkDeviceWaitIdle(m_context->device);
+        vkDestroyPipeline(m_context->device, m_tonemapPipeline, nullptr);
+        m_tonemapPipeline = VK_NULL_HANDLE;
+    }
+    createTonemapPipeline(colorFormat);
 }
 
 void RayTracer::createSBT()

@@ -41,6 +41,8 @@ public:
 
     bool rayQuerySupported = false;
     bool rayTracingPipelineSupported = false;
+    bool swapchainColorSpaceSupported = false;   // 实例启用了 VK_EXT_swapchain_colorspace
+    bool hdrMetadataSupported = false;           // 设备启用了 VK_EXT_hdr_metadata
 
 private:
     void createInstance(Platform& platform);

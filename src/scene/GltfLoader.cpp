@@ -519,6 +519,21 @@ bool loadGltfScene(const std::string& filename, Scene& out, std::string& error)
         out.lights.push_back(light);
     }
 
+    // 补充两盏彩色高亮球灯，用于体现 HDR 峰值与色溢
+    Light warmAccent;
+    warmAccent.type = 1;
+    warmAccent.position = glm::vec3(center.x, center.y + size.y * 0.10f, center.z + size.z * 0.25f);
+    warmAccent.emission = glm::vec3(80.0f, 50.0f, 25.0f);
+    warmAccent.radius = 0.4f;
+    out.lights.push_back(warmAccent);
+
+    Light coolAccent;
+    coolAccent.type = 1;
+    coolAccent.position = glm::vec3(center.x, center.y + size.y * 0.10f, center.z - size.z * 0.25f);
+    coolAccent.emission = glm::vec3(25.0f, 50.0f, 90.0f);
+    coolAccent.radius = 0.4f;
+    out.lights.push_back(coolAccent);
+
     RT_LOG("Loaded glTF: %zu meshes, %zu materials, %zu textures, %zu instances", out.meshes.size(),
            out.materials.size(), out.textures.size(), out.instances.size());
     return true;

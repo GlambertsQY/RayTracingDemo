@@ -23,6 +23,7 @@ public:
     void shutdown();
 
     void setScene(const GpuScene& scene, VkExtent2D renderExtent, VkExtent2D outputExtent);
+    void setColorFormat(VkFormat colorFormat);
     void render(VkCommandBuffer cmd, const FrameConstants& constants, bool resetAccumulation,
                 VkImage colorImage, VkImageView colorView,
                 const std::function<void(VkCommandBuffer)>& overlay = nullptr);
@@ -40,6 +41,7 @@ private:
     void createDescriptors(const GpuScene& scene);
     void createSizeImages(VkExtent2D extent);
     void createPipelines(VkFormat colorFormat);
+    void createTonemapPipeline(VkFormat colorFormat);
     void createSBT();
 
     VkShaderModule loadShader(const char* name) const;

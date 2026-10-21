@@ -27,7 +27,8 @@ bool renderSettingsDiffer(const Settings& a, const Settings& b)
     return a.maxBounces != b.maxBounces || a.neeBounces != b.neeBounces ||
            a.samplesPerFrame != b.samplesPerFrame || a.exposure != b.exposure ||
            a.sunIntensity != b.sunIntensity || a.sunAzimuth != b.sunAzimuth || a.sunElevation != b.sunElevation ||
-           a.envIntensity != b.envIntensity || a.fireflyClamp != b.fireflyClamp;
+           a.envIntensity != b.envIntensity || a.fireflyClamp != b.fireflyClamp ||
+           a.fogDensity != b.fogDensity || a.fogAlbedo != b.fogAlbedo || a.fogAnisotropy != b.fogAnisotropy;
 }
 } // namespace
 
@@ -43,6 +44,15 @@ bool Application::init(Platform& platform, const Options& options)
     m_settings.neeBounces = 1;
     m_settings.samplesPerFrame = 1;
     m_settings.renderScale = 0.5f;
+    m_settings.fireflyClamp = 20.0f;
+    // 请求 HDR 输出；实际是否可用由交换链格式决定，失败时回退 SDR
+    m_settings.hdrOutput = platform.hdrOutputSupported() && platform.setHdrOutput(true);
+    // 按屏幕实际 HDR 峰值亮度初始化（未知时保持 1000 nits）
+    const float displayPeakNits = platform.hdrDisplayPeakNits();
+    if (displayPeakNits > 0.0f)
+    {
+        m_settings.hdrPeakNits = std::clamp(displayPeakNits, 400.0f, 4000.0f);
+    }
 #endif
 
 #ifdef RTDEMO_HAVE_RENDERDOC
@@ -85,12 +95,11 @@ bool Application::init(Platform& platform, const Options& options)
 
     m_resources.init(m_context);
 
-    platform.getFramebufferSize(m_width, m_height);
-    m_swapchain.init(m_context, m_width, m_height);
+    initSwapchain();
 
     createFrameResources();
     m_rayTracer.init(m_context, m_resources, m_swapchain.format);
-    m_ui.init(m_context, platform, m_swapchain.format, m_swapchain.imageCount());
+    m_ui.init(m_context, platform, m_swapchain.format, m_swapchain.imageCount(), m_swapchain.hdr());
     m_uiInitialized = true;
     platform.setImGuiInputEnabled(true);
 
@@ -100,6 +109,58 @@ bool Application::init(Platform& platform, const Options& options)
 
     m_lastTime = std::chrono::steady_clock::now();
     return true;
+}
+
+void Application::initSwapchain()
+{
+    if (m_platform)
+    {
+        m_platform->getFramebufferSize(m_width, m_height);
+    }
+
+    // 先记录峰值亮度，交换链创建时会一并写入 HDR metadata
+    m_swapchain.setHdrMetadata(m_context, m_settings.hdrPeakNits);
+    m_swapchain.init(m_context, m_width, m_height, m_settings.hdrOutput);
+
+    if (m_settings.hdrOutput && !m_swapchain.hdr())
+    {
+        RT_LOG("HDR output not supported by surface, falling back to SDR");
+        m_settings.hdrOutput = false;
+        if (m_platform)
+        {
+            m_platform->setHdrOutput(false);
+        }
+        m_swapchain.recreate(m_context, m_width, m_height, false);
+    }
+
+    RT_LOG("Output: %s", m_swapchain.hdr() ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)");
+}
+
+void Application::applyHdrToggle()
+{
+    m_pendingHdrToggle = false;
+    if (!m_platform)
+    {
+        return;
+    }
+
+    if (m_settings.hdrOutput)
+    {
+        if (!m_platform->hdrOutputSupported() || !m_platform->setHdrOutput(true))
+        {
+            RT_LOG("HDR output request failed");
+            m_settings.hdrOutput = false;
+            return;
+        }
+    }
+    else
+    {
+        m_platform->setHdrOutput(false);
+    }
+
+    // 切换 dataspace 需要重建 surface 与交换链（复用 SurfaceLost 路径）
+    suspend();
+    resume();
 }
 
 void Application::createFrameResources()
@@ -167,7 +228,7 @@ void Application::destroyFrameResources()
 
 void Application::loadSceneIfNeeded(int sceneIndex)
 {
-    if (sceneIndex < 0 || sceneIndex > 1 || m_sceneLoaded[sceneIndex])
+    if (sceneIndex < 0 || sceneIndex > 3 || m_sceneLoaded[sceneIndex])
     {
         return;
     }
@@ -184,6 +245,18 @@ void Application::loadSceneIfNeeded(int sceneIndex)
 
         RT_LOG("Sponza unavailable (%s), falling back to procedural scene",
                error.empty() ? "asset not found" : error.c_str());
+    }
+    else if (sceneIndex == 2)
+    {
+        m_scenes[2] = buildShowcaseScene();
+        m_sceneLoaded[2] = true;
+        return;
+    }
+    else if (sceneIndex == 3)
+    {
+        m_scenes[3] = buildSunlitGalleryScene();
+        m_sceneLoaded[3] = true;
+        return;
     }
 
     m_scenes[0] = buildProceduralScene();
@@ -208,6 +281,55 @@ void Application::updateScene(int sceneIndex)
     const int actualScene = m_settings.sceneIndex;
     const Scene& scene = m_scenes[actualScene];
 
+    // 每个场景的默认观感参数（夕阳场景带体积雾，其他场景关闭）
+    if (actualScene == 2)
+    {
+        m_settings.fogDensity = 0.015f;
+        m_settings.fogAlbedo = 0.90f;
+        m_settings.fogAnisotropy = 0.78f;
+        m_settings.sunAzimuth = 55.0f;
+        m_settings.sunElevation = 8.0f;
+        m_settings.sunIntensity = 16.0f;
+        m_settings.envIntensity = 0.3f;
+        m_settings.fireflyClamp = 500.0f;
+#if defined(__ANDROID__)
+        m_settings.maxBounces = 3;
+        m_settings.neeBounces = 1;
+#endif
+    }
+    else if (actualScene == 3)
+    {
+        // 阳光展厅：天窗百叶 + 轻雾，光照丰富但几何/光源数量都很小
+        m_settings.fogDensity = 0.010f;
+        m_settings.fogAlbedo = 0.88f;
+        m_settings.fogAnisotropy = 0.55f;
+        m_settings.sunAzimuth = 25.0f;
+        m_settings.sunElevation = 32.0f;
+        m_settings.sunIntensity = 11.0f;
+        m_settings.envIntensity = 0.12f;
+        m_settings.fireflyClamp = 50.0f;
+#if defined(__ANDROID__)
+        m_settings.maxBounces = 3;
+        m_settings.neeBounces = 1;
+#endif
+    }
+    else
+    {
+        m_settings.fogDensity = 0.0f;
+        m_settings.sunAzimuth = 40.0f;
+        m_settings.sunElevation = 45.0f;
+        m_settings.sunIntensity = 4.0f;
+        m_settings.envIntensity = 0.9f;
+#if defined(__ANDROID__)
+        m_settings.fireflyClamp = 20.0f;
+        m_settings.maxBounces = 2;
+        m_settings.neeBounces = 1;
+#else
+        m_settings.fireflyClamp = 5.0f;
+#endif
+    }
+    m_fogDistance = std::max(scene.radius() * (actualScene >= 2 ? 1.15f : 3.0f), 12.0f);
+
     m_gpuScene.destroy();
     m_gpuScene.create(m_context, m_resources, scene);
 
@@ -223,6 +345,22 @@ void Application::updateScene(int sceneIndex)
         m_camera.target = scene.center();
         m_camera.yaw = glm::radians(-90.0f);
         m_camera.pitch = 0.0f;
+    }
+    else if (actualScene == 2)
+    {
+        // 站在展厅内部，朝开放口方向看夕阳与体积光柱
+        m_camera.target = glm::vec3(0.0f, 3.2f, 1.0f);
+        m_camera.distance = 10.5f;
+        m_camera.yaw = glm::radians(180.0f);
+        m_camera.pitch = glm::radians(0.0f);
+    }
+    else if (actualScene == 3)
+    {
+        // 站在阳光展厅后部，朝开放的正面看百叶光柱与展品
+        m_camera.target = glm::vec3(0.0f, 2.3f, 2.0f);
+        m_camera.distance = 9.0f;
+        m_camera.yaw = glm::radians(180.0f);
+        m_camera.pitch = glm::radians(5.0f);
     }
     m_camera.aspect =
         static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
@@ -256,7 +394,8 @@ void Application::recreateSwapchain(bool force)
     }
 
     vkDeviceWaitIdle(m_context.device);
-    m_swapchain.recreate(m_context, m_width, m_height);
+    m_swapchain.recreate(m_context, m_width, m_height, m_settings.hdrOutput);
+    m_rayTracer.setColorFormat(m_swapchain.format);
 
     for (VkSemaphore semaphore : m_renderFinished)
     {
@@ -325,9 +464,10 @@ void Application::resume()
     }
 
     m_platform->getFramebufferSize(m_width, m_height);
-    m_swapchain.init(m_context, m_width, m_height);
+    initSwapchain();
     createFrameResources();
-    m_ui.init(m_context, *m_platform, m_swapchain.format, m_swapchain.imageCount());
+    m_rayTracer.setColorFormat(m_swapchain.format);
+    m_ui.init(m_context, *m_platform, m_swapchain.format, m_swapchain.imageCount(), m_swapchain.hdr());
     m_uiInitialized = true;
     m_platform->setImGuiInputEnabled(true);
 
@@ -395,7 +535,7 @@ void Application::updateConstants()
     m_constants.neeBounces = static_cast<uint32_t>(std::clamp(m_settings.neeBounces, 0, m_settings.maxBounces));
     m_constants.samplesPerFrame = static_cast<uint32_t>(std::max(m_settings.samplesPerFrame, 1));
     m_constants.lightCount = m_gpuScene.lightCount;
-    m_constants.flags = 0;
+    m_constants.flags = (m_swapchain.hdr() ? 1u : 0u) | (m_activeScene == 2 ? 2u : 0u);
     m_constants.fov = m_camera.fovY;
 
     const float azimuth = glm::radians(m_settings.sunAzimuth);
@@ -403,11 +543,30 @@ void Application::updateConstants()
     const glm::vec3 sunDirection(std::cos(elevation) * std::sin(azimuth), std::sin(elevation),
                                  std::cos(elevation) * std::cos(azimuth));
     m_constants.sunDir = glm::vec4(glm::normalize(sunDirection), 1.0f);
-    m_constants.sunColor = glm::vec4(1.0f, 0.95f, 0.86f, m_settings.sunIntensity);
+    if (m_activeScene == 2)
+    {
+        // 夕阳：低角度暖色太阳
+        m_constants.sunColor = glm::vec4(1.0f, 0.52f, 0.24f, m_settings.sunIntensity);
+    }
+    else if (m_activeScene == 3)
+    {
+        // 阳光展厅：暖白阳光
+        m_constants.sunColor = glm::vec4(1.0f, 0.82f, 0.62f, m_settings.sunIntensity);
+    }
+    else
+    {
+        m_constants.sunColor = glm::vec4(1.0f, 0.95f, 0.86f, m_settings.sunIntensity);
+    }
 
     m_constants.exposure = m_settings.exposure;
     m_constants.envIntensity = m_settings.envIntensity;
     m_constants.fireflyClamp = m_settings.fireflyClamp;
+    m_constants.paperWhiteNits = 203.0f;
+    m_constants.hdrPeakNits = m_settings.hdrPeakNits;
+    m_constants.fogDensity = m_settings.fogDensity;
+    m_constants.fogAlbedo = m_settings.fogAlbedo;
+    m_constants.fogAnisotropy = m_settings.fogAnisotropy;
+    m_constants.fogDistance = m_fogDistance;
 }
 
 bool Application::drawUI()
@@ -424,9 +583,10 @@ bool Application::drawUI()
     ImGui::SetNextWindowSize(ImVec2(720.0f, 900.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Ray Tracer");
 
-    static const char* scenes[] = {"Procedural (instanced)", "Sponza (glTF)", nullptr};
+    static const char* scenes[] = {"Procedural (instanced)", "Sponza (glTF)", "HDR Showcase (sunset fog)",
+                                   "Sunlit Gallery (light shafts)", nullptr};
     int sceneIndex = m_settings.sceneIndex;
-    if (ImGui::Combo("Scene", &sceneIndex, scenes, 2))
+    if (ImGui::Combo("Scene", &sceneIndex, scenes, 4))
     {
         m_settings.sceneIndex = sceneIndex;
         switchScene = true;
@@ -454,7 +614,28 @@ bool Application::drawUI()
     ImGui::SliderFloat("Sun azimuth", &m_settings.sunAzimuth, 0.0f, 360.0f, "%.0f deg");
     ImGui::SliderFloat("Sun elevation", &m_settings.sunElevation, 1.0f, 89.0f, "%.0f deg");
     ImGui::SliderFloat("Environment", &m_settings.envIntensity, 0.0f, 3.0f, "%.2f");
-    ImGui::SliderFloat("Firefly clamp", &m_settings.fireflyClamp, 1.0f, 50.0f, "%.1f");
+    ImGui::SliderFloat("Firefly clamp", &m_settings.fireflyClamp, 1.0f, 1000.0f, "%.1f");
+
+    ImGui::Separator();
+    ImGui::SliderFloat("Fog density", &m_settings.fogDensity, 0.0f, 0.15f, "%.3f");
+    ImGui::SliderFloat("Fog albedo", &m_settings.fogAlbedo, 0.1f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Fog anisotropy", &m_settings.fogAnisotropy, -0.9f, 0.9f, "%.2f");
+
+    if (m_platform->hdrOutputSupported())
+    {
+        if (ImGui::Checkbox("HDR output", &m_settings.hdrOutput))
+        {
+            m_pendingHdrToggle = true;
+        }
+        if (m_swapchain.hdr())
+        {
+            ImGui::SliderFloat("HDR peak (nits)", &m_settings.hdrPeakNits, 400.0f, 4000.0f, "%.0f");
+        }
+        else
+        {
+            ImGui::TextDisabled("HDR unavailable: SDR output");
+        }
+    }
 
     ImGui::Separator();
     float fovDegrees = glm::degrees(m_camera.fovY);
@@ -501,6 +682,15 @@ bool Application::drawUI()
     ImGui::Text("Instances: %u", m_gpuScene.instanceCount);
     ImGui::Text("Triangles: %u", m_gpuScene.triangleCount);
     ImGui::Text("Lights: %u", m_gpuScene.lightCount);
+    ImGui::Text("Fog: %.3f (g %.2f)", m_settings.fogDensity, m_settings.fogAnisotropy);
+    if (m_swapchain.hdr())
+    {
+        ImGui::Text("HDR: on (PQ, %.0f nits peak)", m_settings.hdrPeakNits);
+    }
+    else
+    {
+        ImGui::Text("HDR: off");
+    }
     ImGui::Text("GPU: %s", m_context.props.deviceName);
     ImGui::End();
 
@@ -598,6 +788,11 @@ void Application::tick(Platform& platform, const FrameInput& input)
     else if (renderSettingsDiffer(before, m_settings))
     {
         m_resetAccumulation = true;
+    }
+
+    if (std::abs(before.hdrPeakNits - m_settings.hdrPeakNits) > 0.5f)
+    {
+        m_swapchain.setHdrMetadata(m_context, m_settings.hdrPeakNits);
     }
 
     if (std::abs(before.renderScale - m_settings.renderScale) > 1e-6f && m_activeScene >= 0)
@@ -722,6 +917,12 @@ void Application::run(Platform& platform)
             continue;
         default:
             break;
+        }
+
+        if (m_pendingHdrToggle)
+        {
+            applyHdrToggle();
+            continue;
         }
 
         if (!platform.windowValid())

@@ -79,6 +79,9 @@ bool Context::init(Platform& platform)
     RT_LOG("GPU: %s (API %u.%u.%u)", props.deviceName, VK_VERSION_MAJOR(props.apiVersion),
            VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
     RT_LOG("Ray tracing pipeline: %s", rayTracingPipelineSupported ? "supported" : "unavailable");
+    RT_LOG("HDR: colorspace extension %s, metadata extension %s",
+           swapchainColorSpaceSupported ? "available" : "unavailable",
+           hdrMetadataSupported ? "available" : "unavailable");
     return true;
 }
 
@@ -103,6 +106,17 @@ void Context::createInstance(Platform& platform)
 
     std::vector<const char*> extensions = platform.instanceExtensions();
     extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    // HDR 输出需要查询 BT.2020/PQ 等色彩空间
+    uint32_t instanceExtensionCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &instanceExtensionCount, nullptr);
+    std::vector<VkExtensionProperties> instanceExtensions(instanceExtensionCount);
+    vkEnumerateInstanceExtensionProperties(nullptr, &instanceExtensionCount, instanceExtensions.data());
+    swapchainColorSpaceSupported = extensionAvailable(instanceExtensions, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+    if (swapchainColorSpaceSupported)
+    {
+        extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+    }
 
     const std::vector<const char*> validationLayers = {"VK_LAYER_KHRONOS_validation"};
 
@@ -364,6 +378,13 @@ void Context::createDevice()
     if (rayTracingPipelineSupported)
     {
         deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    }
+
+    const std::vector<VkExtensionProperties> availableExtensions = enumerateDeviceExtensions(physicalDevice);
+    hdrMetadataSupported = extensionAvailable(availableExtensions, VK_EXT_HDR_METADATA_EXTENSION_NAME);
+    if (hdrMetadataSupported)
+    {
+        deviceExtensions.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME);
     }
 
     VkDeviceCreateInfo createInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};

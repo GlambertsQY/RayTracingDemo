@@ -346,6 +346,357 @@ Scene buildProceduralScene()
     ceilingLight.v = glm::vec3(0.0f, 0.0f, 1.7f);
     scene.lights.push_back(ceilingLight);
 
+    // --- 4 盏彩色球形灯：为 HDR 提供高亮峰值与色溢，并放置发光球体作为可见光源
+    struct AccentLight
+    {
+        glm::vec3 position;
+        glm::vec3 emission;
+    };
+    const AccentLight accentLights[4] = {
+        {{-2.8f, 3.4f, -2.8f}, {18.0f, 6.0f, 1.5f}},   // 暖琥珀
+        {{2.8f, 3.4f, -2.8f}, {1.5f, 9.0f, 18.0f}},    // 青
+        {{-2.8f, 3.4f, 2.8f}, {17.0f, 2.0f, 9.0f}},    // 洋红
+        {{2.8f, 3.4f, 2.8f}, {6.0f, 13.0f, 18.0f}},    // 冷白
+    };
+    for (const AccentLight& accent : accentLights)
+    {
+        Light light;
+        light.type = 1;
+        light.position = accent.position;
+        light.emission = accent.emission;
+        light.radius = 0.28f;
+        scene.lights.push_back(light);
+
+        Material bulb = makeMaterial({0.0f, 0.0f, 0.0f}, 1.0f);
+        bulb.emissive = accent.emission * 0.6f;
+        const int bulbMaterial = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(bulb);
+
+        addInstance(glm::translate(glm::mat4(1.0f), accent.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.3f)),
+                    sphereMesh, bulbMaterial);
+    }
+
+    scene.computeBounds();
+    return scene;
+}
+
+// HDR 展示场景：低角度夕阳 + 体积雾 + 三档亮度（灯板 / 灯球 / 聚光灯）
+Scene buildShowcaseScene()
+{
+    Scene scene;
+
+    auto addMaterial = [&](const glm::vec3& color, float roughness, float metallic = 0.0f) {
+        const int index = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(makeMaterial(color, roughness, metallic));
+        return index;
+    };
+    auto addEmissiveMaterial = [&](const glm::vec3& emission) {
+        Material material = makeMaterial({0.0f, 0.0f, 0.0f}, 1.0f);
+        material.emissive = emission;
+        const int index = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(material);
+        return index;
+    };
+
+    const int matFloor = addMaterial({0.10f, 0.10f, 0.11f}, 0.35f);
+    const int matWall = addMaterial({0.16f, 0.15f, 0.15f}, 0.85f);
+    const int matCeiling = addMaterial({0.08f, 0.08f, 0.09f}, 0.90f);
+    const int matMetal = addMaterial({0.92f, 0.93f, 0.96f}, 0.12f, 1.0f);
+    const int matPedestal = addMaterial({0.22f, 0.22f, 0.24f}, 0.50f);
+
+    // 左 -> 右：弱 / 强 / 极强，便于直观对比 HDR 高光
+    const glm::vec3 panelEmissive[3] = {{1.5f, 1.5f, 1.5f}, {15.0f, 15.0f, 15.0f}, {150.0f, 150.0f, 150.0f}};
+    const glm::vec3 ballEmissive[3] = {{4.0f, 3.2f, 2.4f}, {40.0f, 32.0f, 24.0f}, {400.0f, 320.0f, 240.0f}};
+    const glm::vec3 spotIntensity[3] = {{15.0f, 15.0f, 16.0f}, {150.0f, 150.0f, 160.0f}, {1500.0f, 1500.0f, 1600.0f}};
+
+    int panelMaterial[3];
+    int ballMaterial[3];
+    int spotMaterial[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        panelMaterial[i] = addEmissiveMaterial(panelEmissive[i]);
+        ballMaterial[i] = addEmissiveMaterial(ballEmissive[i]);
+        spotMaterial[i] = addEmissiveMaterial(glm::vec3(60.0f));
+    }
+
+    // --- 网格
+    const int boxMesh = static_cast<int>(scene.meshes.size());
+    scene.meshes.push_back(makeBox());
+    const int sphereMesh = static_cast<int>(scene.meshes.size());
+    scene.meshes.push_back(makeSphere(48, 24));
+    for (auto& mesh : scene.meshes)
+    {
+        finalizeTangents(mesh);
+    }
+
+    auto addInstance = [&](const glm::mat4& transform, int meshIndex, int materialIndex) {
+        Instance inst;
+        inst.transform = transform;
+        inst.mesh = meshIndex;
+        inst.material = materialIndex;
+        scene.instances.push_back(inst);
+    };
+
+    // --- 房间 16 x 8 x 18（z: -11 ~ +7），正面（+z）开放
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0, -0.05f, -2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(16.0f, 0.1f, 18.0f)),
+                boxMesh, matFloor);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0, 4.0f, -11.05f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(16.0f, 8.0f, 0.1f)),
+                boxMesh, matWall);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-8.05f, 4.0f, -2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 8.0f, 18.0f)),
+                boxMesh, matWall);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(8.05f, 4.0f, -2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 8.0f, 18.0f)),
+                boxMesh, matWall);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0, 8.05f, -2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(16.0f, 0.1f, 18.0f)),
+                boxMesh, matCeiling);
+
+    // --- 入口立柱：低角度夕阳穿过入口时投出体积光柱
+    const float pillarX[4] = {-6.0f, -2.0f, 2.0f, 6.0f};
+    for (float x : pillarX)
+    {
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 3.5f, 5.5f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.35f, 7.0f, 0.35f)),
+                    boxMesh, matWall);
+    }
+
+    // --- 三组展示：底座 + 金属球 + 灯板 + 灯球 + 聚光灯灯具（相机从室内朝夕阳方向看）
+    // 左 -> 右：弱 / 强 / 极强，便于直观对比 HDR 高光（相机朝 +z 看，+x 在画面左侧）
+    const float columns[3] = {4.0f, 0.0f, -4.0f};
+    for (int i = 0; i < 3; ++i)
+    {
+        const float x = columns[i];
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.6f, 0.2f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(1.4f, 1.2f, 1.4f)),
+                    boxMesh, matPedestal);
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 1.9f, 0.2f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.85f)),
+                    sphereMesh, matMetal);
+
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 5.2f, 2.0f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(2.2f, 1.4f, 0.06f)),
+                    boxMesh, panelMaterial[i]);
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 3.6f, -0.8f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.3f)),
+                    sphereMesh, ballMaterial[i]);
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 6.8f, 0.6f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.35f, 0.12f, 0.35f)),
+                    boxMesh, spotMaterial[i]);
+    }
+
+    // --- 解析光源：灯板（矩形）、灯球、聚光灯
+    const float innerCos = std::cos(12.0f * kPi / 180.0f);
+    const float outerCos = std::cos(22.0f * kPi / 180.0f);
+    for (int i = 0; i < 3; ++i)
+    {
+        const float x = columns[i];
+
+        Light panel;
+        panel.type = 0;
+        panel.position = glm::vec3(x, 5.2f, 2.0f);
+        panel.emission = panelEmissive[i];
+        panel.u = glm::vec3(1.1f, 0.0f, 0.0f);
+        panel.v = glm::vec3(0.0f, 0.7f, 0.0f);
+        scene.lights.push_back(panel);
+
+        Light ball;
+        ball.type = 1;
+        ball.position = glm::vec3(x, 3.6f, -0.8f);
+        ball.emission = ballEmissive[i];
+        ball.radius = 0.3f;
+        scene.lights.push_back(ball);
+
+        Light spot;
+        spot.type = 2;
+        spot.position = glm::vec3(x, 6.8f, 0.6f);
+        spot.emission = spotIntensity[i];
+        // 朝向相机一侧倾斜，让锥形光束在雾中呈前向散射
+        spot.u = glm::normalize(glm::vec3(0.0f, -1.0f, -0.35f));
+        spot.innerCos = innerCos;
+        spot.outerCos = outerCos;
+        scene.lights.push_back(spot);
+    }
+
+    scene.computeBounds();
+    return scene;
+}
+
+// 阳光展厅：天窗百叶投下条纹光影 + 少量光源，低多边形且带体积雾，兼顾 HDR 与性能
+Scene buildSunlitGalleryScene()
+{
+    Scene scene;
+
+    auto addMaterial = [&](const glm::vec3& color, float roughness, float metallic = 0.0f,
+                           float transmission = 0.0f) {
+        const int index = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(makeMaterial(color, roughness, metallic, transmission));
+        return index;
+    };
+    auto addEmissiveMaterial = [&](const glm::vec3& emission) {
+        Material material = makeMaterial({0.0f, 0.0f, 0.0f}, 1.0f);
+        material.emissive = emission;
+        const int index = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(material);
+        return index;
+    };
+
+    const int matFloor = addMaterial({0.16f, 0.15f, 0.14f}, 0.20f, 0.35f);
+    const int matWall = addMaterial({0.24f, 0.23f, 0.21f}, 0.85f);
+    const int matColumn = addMaterial({0.52f, 0.49f, 0.45f}, 0.55f);
+    const int matMetal = addMaterial({0.95f, 0.95f, 0.98f}, 0.08f, 1.0f);
+    const int matCopper = addMaterial({0.95f, 0.55f, 0.32f}, 0.15f, 1.0f);
+    const int matGlass = addMaterial({1.0f, 1.0f, 1.0f}, 0.0f, 0.0f, 1.0f);
+    const int matStripWarm = addEmissiveMaterial({4.0f, 2.6f, 1.4f});
+    const int matStripCool = addEmissiveMaterial({16.0f, 12.0f, 8.0f});
+    const int matAccentCyan = addEmissiveMaterial({0.0f, 20.0f, 30.0f});
+    const int matAccentMagenta = addEmissiveMaterial({30.0f, 4.0f, 20.0f});
+    const int matSpotFixture = addEmissiveMaterial(glm::vec3(40.0f));
+
+    // --- 网格
+    const int boxMesh = static_cast<int>(scene.meshes.size());
+    scene.meshes.push_back(makeBox());
+    const int sphereMesh = static_cast<int>(scene.meshes.size());
+    scene.meshes.push_back(makeSphere(48, 24));
+    const int torusMesh = static_cast<int>(scene.meshes.size());
+    scene.meshes.push_back(makeTorus(48, 24, 0.35f, 0.14f));
+    for (auto& mesh : scene.meshes)
+    {
+        finalizeTangents(mesh);
+    }
+
+    auto addInstance = [&](const glm::mat4& transform, int meshIndex, int materialIndex) {
+        Instance inst;
+        inst.transform = transform;
+        inst.mesh = meshIndex;
+        inst.material = materialIndex;
+        scene.instances.push_back(inst);
+    };
+
+    // --- 房间 14 x 7 x 18（z: -10 ~ +8），顶部为百叶、正面开放
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0, -0.05f, -1.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(14.0f, 0.1f, 18.0f)),
+                boxMesh, matFloor);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-7.05f, 3.5f, -1.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 7.0f, 18.0f)),
+                boxMesh, matWall);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(7.05f, 3.5f, -1.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 7.0f, 18.0f)),
+                boxMesh, matWall);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0, 3.5f, -10.05f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(14.0f, 7.0f, 0.1f)),
+                boxMesh, matWall);
+
+    // --- 顶部百叶：低角度阳光穿过缝隙形成条纹光影
+    for (float z = -8.8f; z <= 7.8f; z += 1.2f)
+    {
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 6.9f, z)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(14.0f, 0.14f, 0.5f)),
+                    boxMesh, matColumn);
+    }
+
+    // --- 柱廊与展示物
+    const float columns[2] = {-5.8f, 5.8f};
+    for (float x : columns)
+    {
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 3.45f, 3.0f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.5f, 6.9f, 0.5f)),
+                    boxMesh, matColumn);
+    }
+
+    const float displayX[3] = {-3.0f, 0.0f, 3.0f};
+    for (float x : displayX)
+    {
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.5f, 4.0f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(1.2f, 1.0f, 1.2f)),
+                    boxMesh, matColumn);
+    }
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-3.0f, 1.7f, 4.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.7f)),
+                sphereMesh, matMetal);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.7f, 4.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.7f)),
+                sphereMesh, matGlass);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 1.7f, 4.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.7f)),
+                sphereMesh, matCopper);
+
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.5f, 0.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(1.2f, 1.0f, 1.2f)),
+                boxMesh, matColumn);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.6f, 0.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(1.2f)),
+                torusMesh, matMetal);
+
+    // --- 发光灯带与彩色灯球（可见光源体）
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-6.8f, 5.4f, -1.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.12f, 0.16f, 6.0f)),
+                boxMesh, matStripWarm);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(6.8f, 5.4f, -1.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.12f, 0.16f, 6.0f)),
+                boxMesh, matStripCool);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-5.0f, 2.6f, 6.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.25f)),
+                sphereMesh, matAccentCyan);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 2.6f, 6.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.25f)),
+                sphereMesh, matAccentMagenta);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(-3.0f, 6.6f, 2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.3f, 0.1f, 0.3f)),
+                boxMesh, matSpotFixture);
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 6.6f, 2.0f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.3f, 0.1f, 0.3f)),
+                boxMesh, matSpotFixture);
+
+    // --- 解析光源
+    Light warmStrip;
+    warmStrip.type = 0;
+    warmStrip.position = glm::vec3(-6.8f, 5.4f, -1.0f);
+    warmStrip.emission = glm::vec3(4.0f, 2.6f, 1.4f);
+    warmStrip.u = glm::vec3(0.0f, 0.0f, 3.0f);
+    warmStrip.v = glm::vec3(0.0f, 0.35f, 0.0f);
+    scene.lights.push_back(warmStrip);
+
+    Light coolStrip;
+    coolStrip.type = 0;
+    coolStrip.position = glm::vec3(6.8f, 5.4f, -1.0f);
+    coolStrip.emission = glm::vec3(16.0f, 12.0f, 8.0f);
+    coolStrip.u = glm::vec3(0.0f, 0.0f, 3.0f);
+    coolStrip.v = glm::vec3(0.0f, 0.35f, 0.0f);
+    scene.lights.push_back(coolStrip);
+
+    Light cyanBall;
+    cyanBall.type = 1;
+    cyanBall.position = glm::vec3(-5.0f, 2.6f, 6.0f);
+    cyanBall.emission = glm::vec3(0.0f, 20.0f, 30.0f);
+    cyanBall.radius = 0.25f;
+    scene.lights.push_back(cyanBall);
+
+    Light magentaBall;
+    magentaBall.type = 1;
+    magentaBall.position = glm::vec3(5.0f, 2.6f, 6.0f);
+    magentaBall.emission = glm::vec3(30.0f, 4.0f, 20.0f);
+    magentaBall.radius = 0.25f;
+    scene.lights.push_back(magentaBall);
+
+    const float innerCos = std::cos(10.0f * kPi / 180.0f);
+    const float outerCos = std::cos(20.0f * kPi / 180.0f);
+    const float spotX[2] = {-3.0f, 3.0f};
+    const float spotPower[2] = {250.0f, 800.0f};
+    for (int i = 0; i < 2; ++i)
+    {
+        Light spot;
+        spot.type = 2;
+        spot.position = glm::vec3(spotX[i], 6.6f, 2.0f);
+        spot.emission = glm::vec3(spotPower[i], spotPower[i] * 0.95f, spotPower[i] * 0.88f);
+        spot.u = glm::normalize(glm::vec3(0.0f, -1.0f, -0.45f));
+        spot.innerCos = innerCos;
+        spot.outerCos = outerCos;
+        scene.lights.push_back(spot);
+    }
+
     scene.computeBounds();
     return scene;
 }

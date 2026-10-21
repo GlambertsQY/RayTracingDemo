@@ -76,6 +76,9 @@ endif()
 set(SHADER_COMMON
   ${SHADER_SRC_DIR}/shared/common.glsl
   ${SHADER_SRC_DIR}/shared/brdf.glsl
+  ${SHADER_SRC_DIR}/shared/hdr.glsl
+  ${SHADER_SRC_DIR}/shared/volumetric.glsl
+  ${SHADER_SRC_DIR}/shared/lighting.glsl
 )
 
 set(SHADER_FILES
@@ -88,6 +91,7 @@ set(SHADER_FILES
   accumulate.comp
   tonemap.vert
   tonemap.frag
+  imgui_hdr.frag
   path_tracer.comp
 )
 
@@ -151,6 +155,7 @@ target_link_libraries(raytracingdemo PRIVATE
   stb
   glm
   android
+  nativewindow
   log
   vulkan
 )

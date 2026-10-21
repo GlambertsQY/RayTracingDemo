@@ -5,6 +5,7 @@
 
 #include "shared/common.glsl"
 #include "shared/brdf.glsl"
+#include "shared/volumetric.glsl"
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT gTlas;
 
@@ -36,6 +37,8 @@ bool traceOcclusion(vec3 origin, vec3 direction, float maxDistance)
     }
     return rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
 }
+
+#include "shared/lighting.glsl"
 
 PathHit tracePrimary(vec3 origin, vec3 direction)
 {
@@ -93,71 +96,6 @@ PathHit tracePrimary(vec3 origin, vec3 direction)
     return hit;
 }
 
-vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
-{
-    vec3 result = vec3(0.0);
-    if (!isFiniteVec(hitPos) || !isFiniteVec(normal) || dot(normal, normal) < 1e-8)
-    {
-        return result;
-    }
-
-    const vec3 sunDirection = normalize(fc.sunDir.xyz);
-    const float sunCos = dot(normal, sunDirection);
-    if (sunCos > 0.0 && fc.sunColor.w > 0.0)
-    {
-        if (!traceOcclusion(hitPos + normal * 0.005, sunDirection, 1e30))
-        {
-            result += diffuseAlbedo * kInvPi * fc.sunColor.rgb * fc.sunColor.w * sunCos;
-        }
-    }
-
-    const int lightCount = int(fc.lightCount);
-    if (lightCount > 0)
-    {
-        // 均匀随机选择一盏灯，乘以灯数作为 pdf 补偿；移动端避免每跳遍历所有灯
-        const int lightIndex = min(int(rand() * float(lightCount)), lightCount - 1);
-        const GpuLight light = gLights[lightIndex];
-
-        vec3 surfacePoint;
-        vec3 lightNormal;
-        float area;
-        if (light.position.w < 0.5)
-        {
-            surfacePoint = light.position.xyz + light.u.xyz * (rand() * 2.0 - 1.0) +
-                           light.v.xyz * (rand() * 2.0 - 1.0);
-            lightNormal = normalize(cross(light.u.xyz, light.v.xyz));
-            area = 4.0 * length(cross(light.u.xyz, light.v.xyz));
-        }
-        else
-        {
-            const vec3 offset = randomUnitVector();
-            surfacePoint = light.position.xyz + offset * light.emission.w;
-            lightNormal = offset;
-            area = 4.0 * kPi * light.emission.w * light.emission.w;
-        }
-
-        vec3 toLight = surfacePoint - hitPos;
-        const float distanceSquared = max(dot(toLight, toLight), 1e-6);
-        const float distance = sqrt(distanceSquared);
-        toLight /= distance;
-
-        const float surfaceCos = dot(normal, toLight);
-        if (surfaceCos > 0.0)
-        {
-            const float lightCos = light.position.w < 0.5 ? abs(dot(lightNormal, -toLight))
-                                                          : max(dot(lightNormal, -toLight), 0.0);
-            if (lightCos > 0.0 &&
-                !traceOcclusion(hitPos + normal * 0.005, toLight, max(distance - 0.01, 0.001)))
-            {
-                result += diffuseAlbedo * kInvPi * light.emission.rgb * surfaceCos * lightCos * area /
-                          distanceSquared * float(lightCount);
-            }
-        }
-    }
-
-    return result;
-}
-
 void main()
 {
     const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -191,6 +129,41 @@ void main()
         for (int bounce = 0; bounce < maxBounces; ++bounce)
         {
             const PathHit hit = tracePrimary(origin, direction);
+
+            // 体积雾：按指数分布采样散射距离，与最近表面距离比较（关闭时整段跳过）
+            const float surfaceDistance = hit.hit ? hit.t : fc.fogDistance;
+            const float sigmaT = fc.fogDensity;
+            if (sigmaT > 1e-6)
+            {
+                const float mediumDistance = -log(max(1.0 - rand(), 1e-6)) / sigmaT;
+                if (mediumDistance < surfaceDistance)
+                {
+                    const vec3 scatterPosition = origin + direction * mediumDistance;
+                    radiance += throughput * fogLighting(scatterPosition, direction);
+
+                    throughput *= fogSigmaS() / sigmaT;
+                    direction = sampleHgDirection(direction, clamp(fc.fogAnisotropy, -0.95, 0.95));
+                    origin = scatterPosition;
+
+                    if (!isFiniteVec(direction) || dot(direction, direction) < 1e-8)
+                    {
+                        break;
+                    }
+                    if (bounce >= 3)
+                    {
+                        const float survival =
+                            clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+                        if (rand() > survival)
+                        {
+                            break;
+                        }
+                        throughput /= survival;
+                    }
+                    continue;
+                }
+                throughput *= exp(-sigmaT * surfaceDistance);
+            }
+
             if (!hit.hit)
             {
                 radiance += throughput * skyRadiance(direction);

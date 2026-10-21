@@ -47,6 +47,11 @@ public:
     virtual float uiScale() const = 0;
     virtual void* nativeWindow() = 0;
     virtual void setImGuiInputEnabled(bool enabled) = 0;
+
+    // HDR 输出（Android 通过 ANativeWindow dataspace 实现；其他平台默认不支持）
+    virtual bool hdrOutputSupported() const { return false; }
+    virtual bool setHdrOutput(bool) { return false; }
+    virtual float hdrDisplayPeakNits() const { return 0.0f; }   // 0 表示未知
 };
 
 // Windows 平台工厂（Android 由 android_main 直接构造）

@@ -52,12 +52,14 @@ struct Instance
 
 struct Light
 {
-    int       type = 0;            // 0 = 矩形, 1 = 球
+    int       type = 0;            // 0 = 矩形, 1 = 球, 2 = 聚光灯
     glm::vec3 position{0.0f};
-    glm::vec3 emission{0.0f};
-    float     radius = 0.0f;
-    glm::vec3 u{0.0f};
-    glm::vec3 v{0.0f};
+    glm::vec3 emission{0.0f};      // 矩形/球：辐射亮度；聚光灯：发光强度
+    float     radius = 0.0f;       // 球灯半径
+    glm::vec3 u{0.0f};             // 矩形半轴 u / 聚光灯方向
+    glm::vec3 v{0.0f};             // 矩形半轴 v
+    float     innerCos = 1.0f;     // 聚光灯内锥 cos
+    float     outerCos = 0.0f;     // 聚光灯外锥 cos
 };
 
 struct Scene
@@ -76,3 +78,5 @@ struct Scene
 };
 
 Scene buildProceduralScene();
+Scene buildShowcaseScene();
+Scene buildSunlitGalleryScene();

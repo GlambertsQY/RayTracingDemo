@@ -26,10 +26,22 @@ struct FrameConstants
     float     pad0;
     glm::vec2 outputResolution;    // 交换链输出分辨率（放在末尾以保持 scalar layout 对齐）
     uint32_t  neeBounces;          // 执行 NEE 的弹射层数
+    float     paperWhiteNits;      // HDR 输出：SDR 参考白亮度
+    float     hdrPeakNits;         // HDR 输出：峰值亮度
+    float     fogDensity;          // 体积雾散射系数
+    float     fogAlbedo;           // 体积雾单次散射反照率
+    float     fogAnisotropy;       // HG 相函数各向异性
+    float     fogDistance;         // 有效雾深度（场景尺度）
 };
 
 static_assert(offsetof(FrameConstants, outputResolution) == 144, "FrameConstants layout mismatch");
 static_assert(offsetof(FrameConstants, neeBounces) == 152, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, paperWhiteNits) == 156, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, hdrPeakNits) == 160, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, fogDensity) == 164, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, fogAlbedo) == 168, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, fogAnisotropy) == 172, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, fogDistance) == 176, "FrameConstants layout mismatch");
 
 struct GpuMaterial
 {
@@ -82,5 +94,10 @@ struct Settings
     float envIntensity   = 0.9f;
     float fireflyClamp   = 5.0f;
     float renderScale    = 1.0f;
+    float fogDensity     = 0.0f;
+    float fogAlbedo      = 0.95f;
+    float fogAnisotropy  = 0.6f;
+    bool  hdrOutput      = false;
+    float hdrPeakNits    = 1000.0f;
     bool  showUI         = true;
 };

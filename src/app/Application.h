@@ -46,6 +46,8 @@ private:
     void createFrameResources();
     void destroyFrameResources();
     void recreateSwapchain(bool force = false);
+    void initSwapchain();
+    void applyHdrToggle();
     void suspend();
     void resume();
     void updateRenderExtent();
@@ -58,9 +60,10 @@ private:
 
     Options m_options;
     Settings m_settings;
-    Scene m_scenes[2];
-    bool m_sceneLoaded[2]{false, false};
+    Scene m_scenes[4];
+    bool m_sceneLoaded[4]{false, false, false, false};
     int m_activeScene = -1;
+    float m_fogDistance = 100.0f;
 
     Platform* m_platform = nullptr;
     Context m_context;
@@ -73,6 +76,7 @@ private:
 
     bool m_uiInitialized = false;
     bool m_suspended = false;
+    bool m_pendingHdrToggle = false;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;

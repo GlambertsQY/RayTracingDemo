@@ -74,6 +74,12 @@ struct FrameConstants
     float pad0;
     vec2 outputResolution;
     uint neeBounces;
+    float paperWhiteNits;   // HDR 输出：SDR 参考白亮度
+    float hdrPeakNits;      // HDR 输出：峰值亮度
+    float fogDensity;       // 体积雾散射系数
+    float fogAlbedo;        // 体积雾单次散射反照率
+    float fogAnisotropy;    // HG 相函数各向异性
+    float fogDistance;      // 有效雾深度（场景尺度）
 };
 
 layout(scalar, set = 0, binding = 1) uniform FrameConstantsBlock
@@ -250,9 +256,16 @@ vec4 sampleTexture(int index, vec2 uv)
 vec3 skyRadiance(vec3 direction)
 {
     const float y = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    const vec3 ground = vec3(0.16, 0.15, 0.14);
-    const vec3 horizon = vec3(0.62, 0.68, 0.78);
-    const vec3 zenith = vec3(0.20, 0.36, 0.70);
+    vec3 ground = vec3(0.16, 0.15, 0.14);
+    vec3 horizon = vec3(0.62, 0.68, 0.78);
+    vec3 zenith = vec3(0.20, 0.36, 0.70);
+    if ((fc.flags & 2u) != 0u)
+    {
+        // 夕阳天空：地平线暖橙、天顶偏紫
+        ground = vec3(0.18, 0.10, 0.07);
+        horizon = vec3(1.35, 0.55, 0.22);
+        zenith = vec3(0.16, 0.15, 0.30);
+    }
     vec3 color = mix(ground, horizon, smoothstep(0.40, 0.52, y));
     color = mix(color, zenith, smoothstep(0.52, 0.95, y));
     return color * fc.envIntensity;

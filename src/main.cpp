@@ -16,7 +16,22 @@ int main(int argc, char** argv)
         if (arg == "--scene" && i + 1 < argc)
         {
             const std::string value = argv[++i];
-            options.scene = (value == "sponza") ? 1 : 0;
+            if (value == "sponza")
+            {
+                options.scene = 1;
+            }
+            else if (value == "showcase")
+            {
+                options.scene = 2;
+            }
+            else if (value == "gallery")
+            {
+                options.scene = 3;
+            }
+            else
+            {
+                options.scene = 0;
+            }
         }
         else if (arg == "--width" && i + 1 < argc)
         {

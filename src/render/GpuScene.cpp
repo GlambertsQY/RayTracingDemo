@@ -118,8 +118,8 @@ void GpuScene::create(Context& context, Resources& resources, const Scene& scene
         GpuLight g{};
         g.position = glm::vec4(light.position, static_cast<float>(light.type));
         g.emission = glm::vec4(light.emission, light.radius);
-        g.u = glm::vec4(light.u, 0.0f);
-        g.v = glm::vec4(light.v, 0.0f);
+        g.u = glm::vec4(light.u, light.innerCos);
+        g.v = glm::vec4(light.v, light.outerCos);
         gpuLights.push_back(g);
     }
     lightCount = static_cast<uint32_t>(gpuLights.size());

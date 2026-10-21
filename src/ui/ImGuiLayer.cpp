@@ -1,5 +1,6 @@
 #include "ui/ImGuiLayer.h"
 
+#include "common/Assets.h"
 #include "common/Log.h"
 #include "platform/Platform.h"
 #include "vulkan/Context.h"
@@ -27,7 +28,7 @@ PFN_vkVoidFunction imguiVulkanLoader(const char* functionName, void*)
 }
 } // namespace
 
-void ImGuiLayer::init(Context& context, Platform& platform, VkFormat colorFormat, uint32_t imageCount)
+void ImGuiLayer::init(Context& context, Platform& platform, VkFormat colorFormat, uint32_t imageCount, bool hdrOutput)
 {
     m_context = &context;
     g_instance = context.instance;
@@ -69,6 +70,21 @@ void ImGuiLayer::init(Context& context, Platform& platform, VkFormat colorFormat
     info.PipelineInfoMain.PipelineRenderingCreateInfo = pipelineRendering;
     info.UseDynamicRendering = true;
 
+    // HDR10 目标需要把 UI 颜色从 sRGB 转成 PQ，否则面板会明显偏暗
+    if (hdrOutput)
+    {
+        if (assets::readShader("imgui_hdr.frag.spv", m_hdrFragSpirv) && !m_hdrFragSpirv.empty())
+        {
+            info.CustomShaderFragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            info.CustomShaderFragCreateInfo.codeSize = m_hdrFragSpirv.size();
+            info.CustomShaderFragCreateInfo.pCode = reinterpret_cast<const uint32_t*>(m_hdrFragSpirv.data());
+        }
+        else
+        {
+            RT_LOG("ImGui HDR fragment shader unavailable, using default shader");
+        }
+    }
+
     if (!ImGui_ImplVulkan_Init(&info))
     {
         RT_FATAL("ImGui_ImplVulkan_Init failed");
@@ -90,6 +106,7 @@ void ImGuiLayer::shutdown()
 #endif
     ImGui::DestroyContext();
 
+    m_hdrFragSpirv.clear();
     m_context = nullptr;
 }
 

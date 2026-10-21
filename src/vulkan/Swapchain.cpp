@@ -6,9 +6,9 @@
 #include <algorithm>
 #include <limits>
 
-void Swapchain::init(Context& context, uint32_t width, uint32_t height)
+void Swapchain::init(Context& context, uint32_t width, uint32_t height, bool preferHdr)
 {
-    create(context, width, height, VK_NULL_HANDLE);
+    create(context, width, height, preferHdr, VK_NULL_HANDLE);
 }
 
 void Swapchain::shutdown(Context& context)
@@ -24,6 +24,7 @@ void Swapchain::destroy(Context& context)
     }
     views.clear();
     images.clear();
+    m_hdr = false;
 
     if (m_swapchain != VK_NULL_HANDLE)
     {
@@ -32,7 +33,7 @@ void Swapchain::destroy(Context& context)
     }
 }
 
-void Swapchain::create(Context& context, uint32_t width, uint32_t height, VkSwapchainKHR old)
+void Swapchain::create(Context& context, uint32_t width, uint32_t height, bool preferHdr, VkSwapchainKHR old)
 {
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context.physicalDevice, context.surface, &caps);
@@ -51,12 +52,30 @@ void Swapchain::create(Context& context, uint32_t width, uint32_t height, VkSwap
     VkSurfaceFormatKHR surfaceFormat = formats.empty()
                                            ? VkSurfaceFormatKHR{preferredFormat, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR}
                                            : formats[0];
-    for (const auto& candidate : formats)
+    bool hdrSelected = false;
+    if (preferHdr && context.swapchainColorSpaceSupported)
     {
-        if (candidate.format == preferredFormat && candidate.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        for (const auto& candidate : formats)
         {
-            surfaceFormat = candidate;
-            break;
+            if (candidate.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+                candidate.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)
+            {
+                surfaceFormat = candidate;
+                hdrSelected = true;
+                break;
+            }
+        }
+    }
+
+    if (!hdrSelected)
+    {
+        for (const auto& candidate : formats)
+        {
+            if (candidate.format == preferredFormat && candidate.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+            {
+                surfaceFormat = candidate;
+                break;
+            }
         }
     }
 
@@ -126,6 +145,8 @@ void Swapchain::create(Context& context, uint32_t width, uint32_t height, VkSwap
     }
 
     format = surfaceFormat.format;
+    colorSpace = surfaceFormat.colorSpace;
+    m_hdr = hdrSelected;
     this->extent = extent;
 
     uint32_t actualCount = 0;
@@ -147,11 +168,43 @@ void Swapchain::create(Context& context, uint32_t width, uint32_t height, VkSwap
         }
     }
 
-    RT_LOG("Swapchain: %ux%u, %zu images, format %d", extent.width, extent.height, images.size(),
-           static_cast<int>(format));
+    RT_LOG("Swapchain: %ux%u, %zu images, format %d, colorSpace %d (%s)", extent.width, extent.height,
+           images.size(), static_cast<int>(format), static_cast<int>(colorSpace), m_hdr ? "HDR10" : "SDR");
+
+    // HDR10 母版/内容亮度信息（设备不支持该扩展时跳过，Android 依赖窗口 dataspace 即可）
+    if (m_hdr)
+    {
+        applyHdrMetadata(context);
+    }
 }
 
-void Swapchain::recreate(Context& context, uint32_t width, uint32_t height)
+void Swapchain::setHdrMetadata(Context& context, float maxLuminanceNits)
+{
+    m_hdrPeakNits = std::max(maxLuminanceNits, 100.0f);
+    applyHdrMetadata(context);
+}
+
+void Swapchain::applyHdrMetadata(Context& context)
+{
+    if (!m_hdr || !context.hdrMetadataSupported || m_swapchain == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    VkHdrMetadataEXT metadata{VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
+    metadata.displayPrimaryRed = {0.708f, 0.292f};
+    metadata.displayPrimaryGreen = {0.170f, 0.797f};
+    metadata.displayPrimaryBlue = {0.131f, 0.046f};
+    metadata.whitePoint = {0.3127f, 0.3290f};
+    metadata.maxLuminance = m_hdrPeakNits;
+    metadata.minLuminance = 0.05f;
+    metadata.maxContentLightLevel = m_hdrPeakNits;
+    metadata.maxFrameAverageLightLevel = std::min(m_hdrPeakNits, 1000.0f);
+    vkSetHdrMetadataEXT(context.device, 1, &m_swapchain, &metadata);
+    RT_LOG("HDR metadata: peak %.0f nits", m_hdrPeakNits);
+}
+
+void Swapchain::recreate(Context& context, uint32_t width, uint32_t height, bool preferHdr)
 {
     if (width == 0 || height == 0 || context.surface == VK_NULL_HANDLE)
     {
@@ -168,7 +221,7 @@ void Swapchain::recreate(Context& context, uint32_t width, uint32_t height)
     views.clear();
     images.clear();
 
-    create(context, width, height, old);
+    create(context, width, height, preferHdr, old);
 }
 
 VkResult Swapchain::acquireNext(Context& context, VkSemaphore semaphore, uint32_t* imageIndex)

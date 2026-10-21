@@ -6,10 +6,12 @@
 #include "platform/Platform.h"
 
 #include <android/configuration.h>
+#include <android/data_space.h>
 #include <android/input.h>
 #include <android/keycodes.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
+#include <jni.h>
 
 #include <imgui_impl_android.h>
 
@@ -125,6 +127,9 @@ public:
             return VK_NULL_HANDLE;
         }
 
+        // 交换链创建前先设置窗口 buffer dataspace，否则合成器按 SDR 解释 HDR 缓冲
+        applyWindowDataSpace();
+
         VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
         info.window = m_app->window;
 
@@ -155,7 +160,125 @@ public:
 
     void setImGuiInputEnabled(bool enabled) override { m_imguiInputEnabled = enabled; }
 
+    bool hdrOutputSupported() const override { return m_app->window != nullptr; }
+
+    float hdrDisplayPeakNits() const override
+    {
+        if (!m_displayPeakQueried)
+        {
+            m_displayPeakNits = queryDisplayPeakNits();
+            m_displayPeakQueried = true;
+        }
+        return m_displayPeakNits;
+    }
+
+    bool setHdrOutput(bool enabled) override
+    {
+        const bool previous = m_hdrRequested;
+        m_hdrRequested = enabled;
+        if (!applyWindowDataSpace())
+        {
+            m_hdrRequested = previous;
+            return false;
+        }
+        return true;
+    }
+
 private:
+    // 通过 Java Display.getHdrCapabilities().getDesiredMaxLuminance() 查询屏幕 HDR 峰值亮度
+    float queryDisplayPeakNits() const
+    {
+        if (!m_app || !m_app->activity || !m_app->activity->vm || !m_app->activity->clazz)
+        {
+            return 0.0f;
+        }
+
+        JavaVM* vm = m_app->activity->vm;
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK)
+        {
+            if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
+            {
+                return 0.0f;
+            }
+            attached = true;
+        }
+
+        float peakNits = 0.0f;
+        jobject activity = m_app->activity->clazz;
+        jclass activityClass = env->GetObjectClass(activity);
+        jmethodID getWindowManager =
+            env->GetMethodID(activityClass, "getWindowManager", "()Landroid/view/WindowManager;");
+        if (getWindowManager)
+        {
+            jobject windowManager = env->CallObjectMethod(activity, getWindowManager);
+            if (windowManager)
+            {
+                jclass windowManagerClass = env->GetObjectClass(windowManager);
+                jmethodID getDefaultDisplay =
+                    env->GetMethodID(windowManagerClass, "getDefaultDisplay", "()Landroid/view/Display;");
+                if (getDefaultDisplay)
+                {
+                    jobject display = env->CallObjectMethod(windowManager, getDefaultDisplay);
+                    if (display)
+                    {
+                        jclass displayClass = env->GetObjectClass(display);
+                        jmethodID getHdrCapabilities = env->GetMethodID(
+                            displayClass, "getHdrCapabilities", "()Landroid/view/Display$HdrCapabilities;");
+                        if (getHdrCapabilities)
+                        {
+                            jobject capabilities = env->CallObjectMethod(display, getHdrCapabilities);
+                            if (capabilities)
+                            {
+                                jclass capabilitiesClass = env->GetObjectClass(capabilities);
+                                jmethodID getMaxLuminance =
+                                    env->GetMethodID(capabilitiesClass, "getDesiredMaxLuminance", "()F");
+                                if (getMaxLuminance)
+                                {
+                                    peakNits = env->CallFloatMethod(capabilities, getMaxLuminance);
+                                }
+                                env->DeleteLocalRef(capabilitiesClass);
+                                env->DeleteLocalRef(capabilities);
+                            }
+                        }
+                        env->DeleteLocalRef(displayClass);
+                        env->DeleteLocalRef(display);
+                    }
+                }
+                env->DeleteLocalRef(windowManagerClass);
+                env->DeleteLocalRef(windowManager);
+            }
+        }
+        env->DeleteLocalRef(activityClass);
+
+        if (env->ExceptionCheck())
+        {
+            env->ExceptionClear();
+            peakNits = 0.0f;
+        }
+        if (attached)
+        {
+            vm->DetachCurrentThread();
+        }
+
+        RT_LOG("Display HDR peak luminance: %.0f nits", peakNits);
+        return peakNits > 0.0f ? peakNits : 0.0f;
+    }
+
+    bool applyWindowDataSpace()
+    {
+        if (!m_app->window)
+        {
+            return false;
+        }
+
+        const int32_t dataspace = m_hdrRequested ? ADATASPACE_BT2020_PQ : ADATASPACE_SRGB;
+        const int result = ANativeWindow_setBuffersDataSpace(m_app->window, dataspace);
+        RT_LOG("ANativeWindow_setBuffersDataSpace(%s) -> %d", m_hdrRequested ? "BT2020_PQ" : "SRGB", result);
+        return result == 0;
+    }
+
     static void handleAppCmd(android_app* app, int32_t cmd)
     {
         auto* platform = static_cast<PlatformAndroid*>(app->userData);
@@ -282,7 +405,8 @@ private:
                 m_panDelta += (midpoint - m_lastMidpoint) * scale;
                 if (m_lastDistance > 1.0f && distance > 1.0f)
                 {
-                    m_zoomDelta += std::log(m_lastDistance / distance) / 0.12f;
+                    // 手指张开（distance 变大）→ 相机靠近 = 放大
+                    m_zoomDelta += std::log(distance / m_lastDistance) / 0.12f;
                 }
                 m_lastMidpoint = midpoint;
                 m_lastDistance = distance;
@@ -325,6 +449,9 @@ private:
     int32_t m_lastHeight = 0;
 
     int m_activePointers = 0;
+    bool m_hdrRequested = false;
+    mutable bool m_displayPeakQueried = false;
+    mutable float m_displayPeakNits = 0.0f;
     glm::vec2 m_lastPoint{0.0f};
     glm::vec2 m_lastMidpoint{0.0f};
     float m_lastDistance = 0.0f;
