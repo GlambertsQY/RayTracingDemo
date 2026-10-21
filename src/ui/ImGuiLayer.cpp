@@ -1,0 +1,97 @@
+#include "ui/ImGuiLayer.h"
+
+#include "common/Log.h"
+#include "vulkan/Context.h"
+
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
+
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
+namespace
+{
+VkInstance g_instance = VK_NULL_HANDLE;
+
+PFN_vkVoidFunction imguiVulkanLoader(const char* functionName, void*)
+{
+    return vkGetInstanceProcAddr(g_instance, functionName);
+}
+} // namespace
+
+void ImGuiLayer::init(Context& context, GLFWwindow* window, VkFormat colorFormat, uint32_t imageCount)
+{
+    m_context = &context;
+    g_instance = context.instance;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplGlfw_InitForVulkan(window, true);
+    ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, imguiVulkanLoader);
+
+    VkPipelineRenderingCreateInfo pipelineRendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    pipelineRendering.colorAttachmentCount = 1;
+    pipelineRendering.pColorAttachmentFormats = &colorFormat;
+
+    ImGui_ImplVulkan_InitInfo info{};
+    info.ApiVersion = VK_API_VERSION_1_3;
+    info.Instance = context.instance;
+    info.PhysicalDevice = context.physicalDevice;
+    info.Device = context.device;
+    info.QueueFamily = context.graphicsFamily;
+    info.Queue = context.graphicsQueue;
+    info.DescriptorPool = VK_NULL_HANDLE;
+    info.DescriptorPoolSize = 1024;
+    info.MinImageCount = 2;
+    info.ImageCount = imageCount;
+    info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    info.PipelineInfoMain.PipelineRenderingCreateInfo = pipelineRendering;
+    info.UseDynamicRendering = true;
+
+    if (!ImGui_ImplVulkan_Init(&info))
+    {
+        RT_FATAL("ImGui_ImplVulkan_Init failed");
+    }
+}
+
+void ImGuiLayer::shutdown()
+{
+    if (!m_context)
+    {
+        return;
+    }
+
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    m_context = nullptr;
+}
+
+void ImGuiLayer::newFrame()
+{
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+}
+
+void ImGuiLayer::render(VkCommandBuffer cmd)
+{
+    ImGui::Render();
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+}
+
+bool ImGuiLayer::wantCaptureMouse() const
+{
+    return ImGui::GetIO().WantCaptureMouse;
+}
+
+bool ImGuiLayer::wantCaptureKeyboard() const
+{
+    return ImGui::GetIO().WantCaptureKeyboard;
+}

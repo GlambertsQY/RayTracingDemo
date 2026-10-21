@@ -1,0 +1,14 @@
+/.trae/
+/build/
+/build-*/
+/.vs/
+/out/
+/assets/
+/captures/
+/imgui.ini
+/*.png
+/*.log
+/*.err
+*.user
+*.rdc
+*.spv
