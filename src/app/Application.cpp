@@ -1,16 +1,16 @@
 #include "app/Application.h"
 
+#include "common/Assets.h"
 #include "common/Log.h"
+#include "platform/Platform.h"
 #include "scene/GltfLoader.h"
 #include "scene/TextureLoader.h"
-
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -22,26 +22,28 @@
 
 namespace
 {
-float g_scrollDelta = 0.0f;
-
-void scrollCallback(GLFWwindow*, double, double yOffset)
-{
-    g_scrollDelta += static_cast<float>(yOffset);
-}
-
 bool renderSettingsDiffer(const Settings& a, const Settings& b)
 {
-    return a.maxBounces != b.maxBounces || a.samplesPerFrame != b.samplesPerFrame || a.exposure != b.exposure ||
+    return a.maxBounces != b.maxBounces || a.neeBounces != b.neeBounces ||
+           a.samplesPerFrame != b.samplesPerFrame || a.exposure != b.exposure ||
            a.sunIntensity != b.sunIntensity || a.sunAzimuth != b.sunAzimuth || a.sunElevation != b.sunElevation ||
            a.envIntensity != b.envIntensity || a.fireflyClamp != b.fireflyClamp;
 }
 } // namespace
 
-bool Application::init(const Options& options)
+bool Application::init(Platform& platform, const Options& options)
 {
+    m_platform = &platform;
     m_options = options;
     m_settings.sceneIndex = options.scene;
     m_settings.showUI = options.screenshot.empty();
+
+#if defined(__ANDROID__)
+    m_settings.maxBounces = 2;
+    m_settings.neeBounces = 1;
+    m_settings.samplesPerFrame = 1;
+    m_settings.renderScale = 0.5f;
+#endif
 
 #ifdef RTDEMO_HAVE_RENDERDOC
     if (options.renderDocCapture)
@@ -74,41 +76,29 @@ bool Application::init(const Options& options)
     }
 #endif
 
-    if (!glfwInit())
+    if (!m_context.init(platform))
     {
-        RT_LOG("glfwInit failed");
+        RT_LOG("Vulkan context initialization failed");
+        m_context.shutdown();
         return false;
     }
 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-    m_window = glfwCreateWindow(options.width, options.height, "Vulkan Hardware Ray Tracing Demo", nullptr, nullptr);
-    if (!m_window)
-    {
-        RT_LOG("Failed to create window");
-        return false;
-    }
-    glfwSetScrollCallback(m_window, scrollCallback);
-
-    m_context.init(m_window);
     m_resources.init(m_context);
 
-    int framebufferWidth = 0;
-    int framebufferHeight = 0;
-    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-    m_width = static_cast<uint32_t>(std::max(framebufferWidth, 1));
-    m_height = static_cast<uint32_t>(std::max(framebufferHeight, 1));
-    m_swapchain.init(m_context, m_window, m_width, m_height);
+    platform.getFramebufferSize(m_width, m_height);
+    m_swapchain.init(m_context, m_width, m_height);
 
     createFrameResources();
     m_rayTracer.init(m_context, m_resources, m_swapchain.format);
-    m_ui.init(m_context, m_window, m_swapchain.format, m_swapchain.imageCount());
+    m_ui.init(m_context, platform, m_swapchain.format, m_swapchain.imageCount());
+    m_uiInitialized = true;
+    platform.setImGuiInputEnabled(true);
 
-    m_camera.aspect = static_cast<float>(m_swapchain.extent.width) /
-                      static_cast<float>(std::max(m_swapchain.extent.height, 1u));
+    m_camera.aspect =
+        static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
     updateScene(m_settings.sceneIndex);
 
-    m_lastTime = glfwGetTime();
+    m_lastTime = std::chrono::steady_clock::now();
     return true;
 }
 
@@ -140,10 +130,12 @@ void Application::createFrameResources()
         vkCreateSemaphore(m_context.device, &semaphoreInfo, nullptr, &semaphore);
     }
 
+#if !defined(__ANDROID__)
     const VkDeviceSize readbackSize = static_cast<VkDeviceSize>(m_swapchain.extent.width) *
                                       m_swapchain.extent.height * 4;
     m_readback = m_resources.createBuffer(readbackSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY,
                                           true);
+#endif
 }
 
 void Application::destroyFrameResources()
@@ -182,9 +174,9 @@ void Application::loadSceneIfNeeded(int sceneIndex)
 
     if (sceneIndex == 1)
     {
-        const std::string path = std::string(RTDEMO_ASSET_DIR) + "/Sponza/Sponza.gltf";
+        const std::string path = "Sponza/Sponza.gltf";
         std::string error;
-        if (std::filesystem::exists(path) && loadGltfScene(path, m_scenes[1], error))
+        if (assets::exists(path) && loadGltfScene(path, m_scenes[1], error))
         {
             m_sceneLoaded[1] = true;
             return;
@@ -202,6 +194,13 @@ void Application::loadSceneIfNeeded(int sceneIndex)
     }
 }
 
+void Application::updateRenderExtent()
+{
+    const float scale = std::clamp(m_settings.renderScale, 0.25f, 1.0f);
+    m_renderWidth = std::max(1u, static_cast<uint32_t>(static_cast<float>(m_swapchain.extent.width) * scale));
+    m_renderHeight = std::max(1u, static_cast<uint32_t>(static_cast<float>(m_swapchain.extent.height) * scale));
+}
+
 void Application::updateScene(int sceneIndex)
 {
     loadSceneIfNeeded(sceneIndex);
@@ -211,7 +210,9 @@ void Application::updateScene(int sceneIndex)
 
     m_gpuScene.destroy();
     m_gpuScene.create(m_context, m_resources, scene);
-    m_rayTracer.setScene(m_gpuScene, m_swapchain.extent);
+
+    updateRenderExtent();
+    m_rayTracer.setScene(m_gpuScene, {m_renderWidth, m_renderHeight}, m_swapchain.extent);
 
     m_camera.reset(scene.center(), scene.radius());
     if (actualScene == 1)
@@ -223,29 +224,39 @@ void Application::updateScene(int sceneIndex)
         m_camera.yaw = glm::radians(-90.0f);
         m_camera.pitch = 0.0f;
     }
-    m_camera.aspect = static_cast<float>(m_swapchain.extent.width) /
-                      static_cast<float>(std::max(m_swapchain.extent.height, 1u));
+    m_camera.aspect =
+        static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
     m_lastCameraPos = m_camera.position();
     m_lastFov = m_camera.fovY;
+
+    RT_LOG("Scene %d camera pos (%.2f, %.2f, %.2f) target (%.2f, %.2f, %.2f) dist %.2f yaw %.2f",
+           actualScene, m_lastCameraPos.x, m_lastCameraPos.y, m_lastCameraPos.z, m_camera.target.x,
+           m_camera.target.y, m_camera.target.z, m_camera.distance, m_camera.yaw);
 
     m_activeScene = actualScene;
     m_accumulatedFrames = 0;
     m_resetAccumulation = true;
 }
 
-void Application::recreateSwapchain()
+void Application::recreateSwapchain(bool force)
 {
-    int framebufferWidth = 0;
-    int framebufferHeight = 0;
-    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-    if (framebufferWidth <= 0 || framebufferHeight <= 0)
+    if (m_suspended || m_swapchain.handle() == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    m_platform->getFramebufferSize(m_width, m_height);
+    if (m_width == 0 || m_height == 0)
+    {
+        return;
+    }
+    if (!force && m_width == m_swapchain.extent.width && m_height == m_swapchain.extent.height)
     {
         return;
     }
 
     vkDeviceWaitIdle(m_context.device);
-    m_swapchain.recreate(m_context, m_window, static_cast<uint32_t>(framebufferWidth),
-                         static_cast<uint32_t>(framebufferHeight));
+    m_swapchain.recreate(m_context, m_width, m_height);
 
     for (VkSemaphore semaphore : m_renderFinished)
     {
@@ -259,84 +270,104 @@ void Application::recreateSwapchain()
         vkCreateSemaphore(m_context.device, &semaphoreInfo, nullptr, &semaphore);
     }
 
+#if !defined(__ANDROID__)
     m_resources.destroyBuffer(m_readback);
     const VkDeviceSize readbackSize =
         static_cast<VkDeviceSize>(m_swapchain.extent.width) * m_swapchain.extent.height * 4;
     m_readback = m_resources.createBuffer(readbackSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY,
                                           true);
+#endif
 
-    m_rayTracer.setScene(m_gpuScene, m_swapchain.extent);
-    m_camera.aspect = static_cast<float>(m_swapchain.extent.width) /
-                      static_cast<float>(std::max(m_swapchain.extent.height, 1u));
+    if (m_activeScene >= 0)
+    {
+        updateRenderExtent();
+        m_rayTracer.setScene(m_gpuScene, {m_renderWidth, m_renderHeight}, m_swapchain.extent);
+    }
+    m_camera.aspect =
+        static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
     m_accumulatedFrames = 0;
     m_resetAccumulation = true;
 }
 
-void Application::processInput()
+void Application::suspend()
 {
-    ImGuiIO& io = ImGui::GetIO();
+    if (m_suspended || m_context.device == VK_NULL_HANDLE)
+    {
+        return;
+    }
 
-    static bool f1Pressed = false;
-    const bool f1Down = glfwGetKey(m_window, GLFW_KEY_F1) == GLFW_PRESS;
-    if (f1Down && !f1Pressed)
+    RT_LOG("Application suspend");
+
+    vkDeviceWaitIdle(m_context.device);
+    if (m_uiInitialized)
+    {
+        m_platform->setImGuiInputEnabled(false);
+        m_ui.shutdown();
+        m_uiInitialized = false;
+    }
+    destroyFrameResources();
+    m_swapchain.shutdown(m_context);
+    m_context.destroySurface();
+    m_suspended = true;
+}
+
+void Application::resume()
+{
+    if (!m_suspended)
+    {
+        return;
+    }
+
+    if (!m_context.createSurface(*m_platform))
+    {
+        RT_LOG("Failed to recreate Android surface");
+        return;
+    }
+
+    m_platform->getFramebufferSize(m_width, m_height);
+    m_swapchain.init(m_context, m_width, m_height);
+    createFrameResources();
+    m_ui.init(m_context, *m_platform, m_swapchain.format, m_swapchain.imageCount());
+    m_uiInitialized = true;
+    m_platform->setImGuiInputEnabled(true);
+
+    if (m_activeScene >= 0)
+    {
+        updateRenderExtent();
+        m_rayTracer.setScene(m_gpuScene, {m_renderWidth, m_renderHeight}, m_swapchain.extent);
+    }
+    m_camera.aspect =
+        static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
+    m_accumulatedFrames = 0;
+    m_resetAccumulation = true;
+    m_suspended = false;
+
+    RT_LOG("Application resume: %ux%u", m_swapchain.extent.width, m_swapchain.extent.height);
+}
+
+void Application::applyInput(const FrameInput& input)
+{
+    if (input.toggleUI)
     {
         m_settings.showUI = !m_settings.showUI;
     }
-    f1Pressed = f1Down;
 
-    double mouseX = 0.0;
-    double mouseY = 0.0;
-    glfwGetCursorPos(m_window, &mouseX, &mouseY);
-
-    static double lastX = 0.0;
-    static double lastY = 0.0;
-    static bool orbiting = false;
-    static bool panning = false;
-
-    const bool uiCaptured = m_settings.showUI && io.WantCaptureMouse;
-    const float dx = static_cast<float>(mouseX - lastX);
-    const float dy = static_cast<float>(mouseY - lastY);
-
+    const bool uiCaptured = m_settings.showUI && ImGui::GetIO().WantCaptureMouse;
     if (!uiCaptured)
     {
-        const bool leftDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        const bool rightDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-
-        if (leftDown)
+        if (glm::dot(input.orbitDelta, input.orbitDelta) > 0.0f)
         {
-            if (orbiting)
-            {
-                m_camera.orbit(dx, dy);
-            }
-            orbiting = true;
+            m_camera.orbit(input.orbitDelta.x, input.orbitDelta.y);
         }
-        else
+        if (glm::dot(input.panDelta, input.panDelta) > 0.0f)
         {
-            orbiting = false;
+            m_camera.pan(input.panDelta.x, input.panDelta.y);
         }
-
-        if (rightDown)
+        if (std::abs(input.zoomDelta) > 1e-6f)
         {
-            if (panning)
-            {
-                m_camera.pan(dx, dy);
-            }
-            panning = true;
-        }
-        else
-        {
-            panning = false;
-        }
-
-        if (g_scrollDelta != 0.0f)
-        {
-            m_camera.zoom(g_scrollDelta);
+            m_camera.zoom(input.zoomDelta);
         }
     }
-
-    lastX = mouseX;
-    lastY = mouseY;
-    g_scrollDelta = 0.0f;
 
     const glm::vec3 cameraPos = m_camera.position();
     if (glm::length(cameraPos - m_lastCameraPos) > 1e-5f || std::abs(m_camera.fovY - m_lastFov) > 1e-5f)
@@ -356,9 +387,12 @@ void Application::updateConstants()
     m_constants.camRight = glm::vec4(m_camera.right(), 0.0f);
     m_constants.camUp = glm::vec4(m_camera.up(), 0.0f);
     m_constants.camForward = glm::vec4(m_camera.forward(), 0.0f);
-    m_constants.resolution = glm::vec2(m_swapchain.extent.width, m_swapchain.extent.height);
+    m_constants.resolution = glm::vec2(static_cast<float>(m_renderWidth), static_cast<float>(m_renderHeight));
+    m_constants.outputResolution =
+        glm::vec2(static_cast<float>(m_swapchain.extent.width), static_cast<float>(m_swapchain.extent.height));
     m_constants.frameIndex = m_accumulatedFrames;
     m_constants.maxBounces = static_cast<uint32_t>(std::max(m_settings.maxBounces, 1));
+    m_constants.neeBounces = static_cast<uint32_t>(std::clamp(m_settings.neeBounces, 0, m_settings.maxBounces));
     m_constants.samplesPerFrame = static_cast<uint32_t>(std::max(m_settings.samplesPerFrame, 1));
     m_constants.lightCount = m_gpuScene.lightCount;
     m_constants.flags = 0;
@@ -387,7 +421,7 @@ bool Application::drawUI()
     const ImGuiIO& io = ImGui::GetIO();
 
     ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(390.0f, 470.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(720.0f, 900.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Ray Tracer");
 
     static const char* scenes[] = {"Procedural (instanced)", "Sponza (glTF)", nullptr};
@@ -398,8 +432,23 @@ bool Application::drawUI()
         switchScene = true;
     }
 
+    if (m_rayTracer.backendAvailable(RayTracer::Backend::RayTracingPipeline) &&
+        m_rayTracer.backendAvailable(RayTracer::Backend::RayQueryCompute))
+    {
+        static const char* backends[] = {"Ray tracing pipeline", "Ray query compute", nullptr};
+        int backendIndex = m_rayTracer.backend() == RayTracer::Backend::RayTracingPipeline ? 0 : 1;
+        if (ImGui::Combo("Backend", &backendIndex, backends, 2))
+        {
+            m_rayTracer.setBackend(backendIndex == 0 ? RayTracer::Backend::RayTracingPipeline
+                                                     : RayTracer::Backend::RayQueryCompute);
+            m_resetAccumulation = true;
+        }
+    }
+
     ImGui::SliderInt("Max bounces", &m_settings.maxBounces, 1, 8);
+    ImGui::SliderInt("NEE bounces", &m_settings.neeBounces, 0, 4);
     ImGui::SliderInt("Samples / frame", &m_settings.samplesPerFrame, 1, 4);
+    ImGui::SliderFloat("Render scale", &m_settings.renderScale, 0.25f, 1.0f, "%.2f");
     ImGui::SliderFloat("Exposure", &m_settings.exposure, 0.1f, 4.0f, "%.2f");
     ImGui::SliderFloat("Sun intensity", &m_settings.sunIntensity, 0.0f, 15.0f, "%.2f");
     ImGui::SliderFloat("Sun azimuth", &m_settings.sunAzimuth, 0.0f, 360.0f, "%.0f deg");
@@ -427,16 +476,28 @@ bool Application::drawUI()
     }
 
     ImGui::Separator();
+#if defined(__ANDROID__)
+    ImGui::TextUnformatted("One finger: orbit");
+    ImGui::TextUnformatted("Two fingers: pan / pinch zoom");
+    ImGui::TextUnformatted("Back: toggle UI");
+    if (ImGui::Button("Exit"))
+    {
+        m_platform->requestClose();
+    }
+#else
     ImGui::TextUnformatted("LMB: orbit  RMB: pan  Wheel: zoom");
     ImGui::TextUnformatted("F1: toggle UI");
+#endif
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 360.0f, 16.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(344.0f, 200.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 460.0f, 16.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(440.0f, 380.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Statistics");
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameMs);
     ImGui::Text("Accumulated: %u samples", m_accumulatedFrames);
-    ImGui::Text("Resolution: %ux%u", m_swapchain.extent.width, m_swapchain.extent.height);
+    ImGui::Text("Render: %ux%u (%.2f)", m_renderWidth, m_renderHeight, m_settings.renderScale);
+    ImGui::Text("Output: %ux%u", m_swapchain.extent.width, m_swapchain.extent.height);
+    ImGui::Text("Backend: %s", m_rayTracer.backendName());
     ImGui::Text("Instances: %u", m_gpuScene.instanceCount);
     ImGui::Text("Triangles: %u", m_gpuScene.triangleCount);
     ImGui::Text("Lights: %u", m_gpuScene.lightCount);
@@ -448,14 +509,18 @@ bool Application::drawUI()
 
 void Application::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, bool resetAccumulation)
 {
-    const bool capture = !m_options.screenshot.empty() && m_options.frames > 0 &&
-                         (m_frameCount + 1 >= m_options.frames);
-
     m_rayTracer.render(cmd, m_constants, resetAccumulation, m_swapchain.images[imageIndex],
                        m_swapchain.views[imageIndex],
                        [this](VkCommandBuffer overlayCmd) { m_ui.render(overlayCmd); });
 
     const VkImage image = m_swapchain.images[imageIndex];
+#if !defined(__ANDROID__)
+    const bool capture = !m_options.screenshot.empty() && m_options.frames > 0 &&
+                         (m_frameCount + 1 >= m_options.frames);
+#else
+    const bool capture = false;
+#endif
+
     if (capture)
     {
         transitionImage(cmd, image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -474,6 +539,7 @@ void Application::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, bool res
     }
 }
 
+#if !defined(__ANDROID__)
 void Application::captureScreenshot(uint32_t)
 {
     const uint32_t width = m_swapchain.extent.width;
@@ -509,133 +575,171 @@ void Application::captureScreenshot(uint32_t)
         RT_LOG("Screenshot saved: %s", m_options.screenshot.c_str());
     }
 }
+#else
+void Application::captureScreenshot(uint32_t) {}
+#endif
 
-void Application::run()
+void Application::tick(Platform& platform, const FrameInput& input)
 {
-    while (!glfwWindowShouldClose(m_window))
+    const auto now = std::chrono::steady_clock::now();
+    m_frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - m_lastTime).count());
+    m_fps = m_frameMs > 0.0f ? 1000.0f / m_frameMs : 0.0f;
+    m_lastTime = now;
+
+    m_ui.newFrame();
+    applyInput(input);
+
+    const Settings before = m_settings;
+    const bool switchScene = drawUI();
+    if (switchScene)
     {
-        glfwPollEvents();
+        updateScene(m_settings.sceneIndex);
+    }
+    else if (renderSettingsDiffer(before, m_settings))
+    {
+        m_resetAccumulation = true;
+    }
 
-        int framebufferWidth = 0;
-        int framebufferHeight = 0;
-        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-        if (framebufferWidth <= 0 || framebufferHeight <= 0)
-        {
-            glfwWaitEvents();
-            continue;
-        }
+    if (std::abs(before.renderScale - m_settings.renderScale) > 1e-6f && m_activeScene >= 0)
+    {
+        updateRenderExtent();
+        m_rayTracer.setScene(m_gpuScene, {m_renderWidth, m_renderHeight}, m_swapchain.extent);
+        m_resetAccumulation = true;
+    }
 
-        if (static_cast<uint32_t>(framebufferWidth) != m_swapchain.extent.width ||
-            static_cast<uint32_t>(framebufferHeight) != m_swapchain.extent.height)
-        {
-            recreateSwapchain();
-            continue;
-        }
-
-        const double now = glfwGetTime();
-        m_frameMs = static_cast<float>((now - m_lastTime) * 1000.0);
-        m_fps = m_frameMs > 0.0f ? 1000.0f / m_frameMs : 0.0f;
-        m_lastTime = now;
-
-        m_ui.newFrame();
-        processInput();
-
-        const Settings before = m_settings;
-        const bool switchScene = drawUI();
-        if (switchScene)
-        {
-            updateScene(m_settings.sceneIndex);
-        }
-        else if (renderSettingsDiffer(before, m_settings))
-        {
-            m_resetAccumulation = true;
-        }
-
-        m_camera.aspect = static_cast<float>(m_swapchain.extent.width) /
-                          static_cast<float>(std::max(m_swapchain.extent.height, 1u));
-        updateConstants();
-
-        const bool captureThisFrame = !m_options.screenshot.empty() && m_options.frames > 0 &&
-                                      (m_frameCount + 1 >= m_options.frames);
+    m_camera.aspect =
+        static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));
+    updateConstants();
 
 #ifdef RTDEMO_HAVE_RENDERDOC
-        if (m_renderDoc && m_options.renderDocCapture && m_frameCount == 3)
-        {
-            m_renderDoc->StartFrameCapture(nullptr, nullptr);
-            m_renderDocCaptureStarted = true;
-        }
+    if (m_renderDoc && m_options.renderDocCapture && m_frameCount == 3)
+    {
+        m_renderDoc->StartFrameCapture(nullptr, nullptr);
+        m_renderDocCaptureStarted = true;
+    }
 #endif
 
-        vkWaitForFences(m_context.device, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
+    vkWaitForFences(m_context.device, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
 
-        uint32_t imageIndex = 0;
-        const VkResult acquire = m_swapchain.acquireNext(m_context, m_imageAvailable, &imageIndex);
-        if (acquire == VK_ERROR_OUT_OF_DATE_KHR)
-        {
-            recreateSwapchain();
-            continue;
-        }
-        if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR)
-        {
-            RT_FATAL("vkAcquireNextImageKHR failed (%d)", static_cast<int>(acquire));
-        }
+    uint32_t imageIndex = 0;
+    const VkResult acquire = m_swapchain.acquireNext(m_context, m_imageAvailable, &imageIndex);
+    if (acquire == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        recreateSwapchain(true);
+        return;
+    }
+    if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR)
+    {
+        RT_FATAL("vkAcquireNextImageKHR failed (%d)", static_cast<int>(acquire));
+    }
 
-        vkResetFences(m_context.device, 1, &m_frameFence);
-        vkResetCommandBuffer(m_commandBuffer, 0);
+    vkResetFences(m_context.device, 1, &m_frameFence);
+    vkResetCommandBuffer(m_commandBuffer, 0);
 
-        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(m_commandBuffer, &beginInfo);
-        recordFrame(m_commandBuffer, imageIndex, m_resetAccumulation);
-        vkEndCommandBuffer(m_commandBuffer);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(m_commandBuffer, &beginInfo);
+    recordFrame(m_commandBuffer, imageIndex, m_resetAccumulation);
+    vkEndCommandBuffer(m_commandBuffer);
 
-        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &m_imageAvailable;
-        submitInfo.pWaitDstStageMask = &waitStage;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &m_commandBuffer;
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &m_renderFinished[imageIndex];
-        vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, m_frameFence);
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &m_imageAvailable;
+    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_commandBuffer;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &m_renderFinished[imageIndex];
+    vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, m_frameFence);
 
-        const VkResult presentResult =
-            m_swapchain.present(m_context, m_context.graphicsQueue, m_renderFinished[imageIndex], imageIndex);
+    const VkResult presentResult =
+        m_swapchain.present(m_context, m_context.graphicsQueue, m_renderFinished[imageIndex], imageIndex);
 
-        vkWaitForFences(m_context.device, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
+    vkWaitForFences(m_context.device, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
 
 #ifdef RTDEMO_HAVE_RENDERDOC
-        if (m_renderDocCaptureStarted && m_renderDoc)
-        {
-            m_renderDoc->EndFrameCapture(nullptr, nullptr);
-            m_renderDocCaptureStarted = false;
-            RT_LOG("RenderDoc capture written");
-        }
+    if (m_renderDocCaptureStarted && m_renderDoc)
+    {
+        m_renderDoc->EndFrameCapture(nullptr, nullptr);
+        m_renderDocCaptureStarted = false;
+        RT_LOG("RenderDoc capture written");
+    }
 #endif
 
-        if (captureThisFrame)
+#if !defined(__ANDROID__)
+    const bool captureThisFrame = !m_options.screenshot.empty() && m_options.frames > 0 &&
+                                  (m_frameCount + 1 >= m_options.frames);
+    if (captureThisFrame)
+    {
+        captureScreenshot(imageIndex);
+        platform.requestClose();
+    }
+    else
+#endif
+    if (m_options.frames > 0 && m_frameCount + 1 >= m_options.frames)
+    {
+        platform.requestClose();
+    }
+
+    if (m_resetAccumulation)
+    {
+        m_accumulatedFrames = 0;
+        m_resetAccumulation = false;
+    }
+    ++m_accumulatedFrames;
+    ++m_frameCount;
+
+    if (m_frameCount > 0 && (m_frameCount % 120) == 0)
+    {
+        RT_LOG("FPS %.1f (%.2f ms) scene %d render %ux%u samples %u backend %s", m_fps, m_frameMs, m_activeScene,
+               m_renderWidth, m_renderHeight, m_accumulatedFrames, m_rayTracer.backendName());
+    }
+
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        recreateSwapchain(true);
+    }
+    // Android 合成器可能持续返回 VK_SUBOPTIMAL_KHR，按成功处理，避免每帧重建交换链
+}
+
+void Application::run(Platform& platform)
+{
+    while (!platform.shouldClose())
+    {
+        FrameInput input{};
+        const PlatformEvent event = platform.pumpEvents(input);
+
+        switch (event)
         {
-            captureScreenshot(imageIndex);
-            glfwSetWindowShouldClose(m_window, GLFW_TRUE);
-        }
-        else if (m_options.frames > 0 && m_frameCount + 1 >= m_options.frames)
-        {
-            glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+        case PlatformEvent::Quit:
+            return;
+        case PlatformEvent::SurfaceLost:
+            suspend();
+            continue;
+        case PlatformEvent::SurfaceCreated:
+            resume();
+            continue;
+        default:
+            break;
         }
 
-        if (m_resetAccumulation)
+        if (!platform.windowValid())
         {
-            m_accumulatedFrames = 0;
-            m_resetAccumulation = false;
+            platform.waitForWindow();
+            continue;
         }
-        ++m_accumulatedFrames;
-        ++m_frameCount;
 
-        if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
+        if (event == PlatformEvent::Resized)
         {
             recreateSwapchain();
+            if (m_suspended)
+            {
+                continue;
+            }
         }
+
+        tick(platform, input);
     }
 }
 
@@ -646,21 +750,20 @@ void Application::shutdown()
         vkDeviceWaitIdle(m_context.device);
     }
 
-    if (m_window && m_context.device != VK_NULL_HANDLE)
+    if (m_context.device != VK_NULL_HANDLE)
     {
-        m_ui.shutdown();
+        if (m_uiInitialized && m_platform)
+        {
+            m_platform->setImGuiInputEnabled(false);
+            m_ui.shutdown();
+            m_uiInitialized = false;
+        }
         m_rayTracer.shutdown();
         m_gpuScene.destroy();
         destroyFrameResources();
         m_swapchain.shutdown(m_context);
         m_resources.shutdown();
-        m_context.shutdown();
     }
 
-    if (m_window)
-    {
-        glfwDestroyWindow(m_window);
-        m_window = nullptr;
-    }
-    glfwTerminate();
+    m_context.shutdown();
 }

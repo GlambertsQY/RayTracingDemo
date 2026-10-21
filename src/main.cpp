@@ -1,6 +1,8 @@
 #include "app/Application.h"
 #include "common/Log.h"
+#include "platform/Platform.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -38,15 +40,25 @@ int main(int argc, char** argv)
         }
     }
 
-    Application app;
-    if (!app.init(options))
+    std::unique_ptr<Platform> platform = createPlatform();
+    if (!platform->init("Vulkan Hardware Ray Tracing Demo", options.width, options.height))
     {
-        RT_LOG("Application initialization failed");
-        app.shutdown();
+        RT_LOG("Platform initialization failed");
+        platform->shutdown();
         return 1;
     }
 
-    app.run();
+    Application app;
+    if (!app.init(*platform, options))
+    {
+        RT_LOG("Application initialization failed");
+        app.shutdown();
+        platform->shutdown();
+        return 1;
+    }
+
+    app.run(*platform);
     app.shutdown();
+    platform->shutdown();
     return 0;
 }

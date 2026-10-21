@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <cstddef>
 #include <cstdint>
 
 // CPU/GPU 共享的每帧常量。所有 SSBO/UBO 使用 scalar layout，字段顺序即内存顺序。
@@ -23,7 +24,12 @@ struct FrameConstants
     float     envIntensity;
     float     fireflyClamp;
     float     pad0;
+    glm::vec2 outputResolution;    // 交换链输出分辨率（放在末尾以保持 scalar layout 对齐）
+    uint32_t  neeBounces;          // 执行 NEE 的弹射层数
 };
+
+static_assert(offsetof(FrameConstants, outputResolution) == 144, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, neeBounces) == 152, "FrameConstants layout mismatch");
 
 struct GpuMaterial
 {
@@ -67,6 +73,7 @@ struct Settings
 {
     int   sceneIndex     = 0;     // 0 = 程序化场景, 1 = Sponza
     int   maxBounces     = 4;
+    int   neeBounces     = 4;
     int   samplesPerFrame = 1;
     float exposure       = 1.0f;
     float sunIntensity   = 4.0f;
@@ -74,5 +81,6 @@ struct Settings
     float sunElevation   = 45.0f;
     float envIntensity   = 0.9f;
     float fireflyClamp   = 5.0f;
+    float renderScale    = 1.0f;
     bool  showUI         = true;
 };

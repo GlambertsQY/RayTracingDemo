@@ -1,14 +1,21 @@
 #include "ui/ImGuiLayer.h"
 
 #include "common/Log.h"
+#include "platform/Platform.h"
 #include "vulkan/Context.h"
 
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 
-#define GLFW_INCLUDE_NONE
+#include <algorithm>
+
+#if defined(__ANDROID__)
+#include <android/native_window.h>
+#include <imgui_impl_android.h>
+#else
 #include <GLFW/glfw3.h>
+#include <imgui_impl_glfw.h>
+#endif
 
 namespace
 {
@@ -20,7 +27,7 @@ PFN_vkVoidFunction imguiVulkanLoader(const char* functionName, void*)
 }
 } // namespace
 
-void ImGuiLayer::init(Context& context, GLFWwindow* window, VkFormat colorFormat, uint32_t imageCount)
+void ImGuiLayer::init(Context& context, Platform& platform, VkFormat colorFormat, uint32_t imageCount)
 {
     m_context = &context;
     g_instance = context.instance;
@@ -29,9 +36,18 @@ void ImGuiLayer::init(Context& context, GLFWwindow* window, VkFormat colorFormat
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+#if defined(__ANDROID__)
+    io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+    // 移动端字体按密度放大，但限制在 2x，避免面板内容被截断
+    const float uiScale = std::min(platform.uiScale(), 2.0f);
+    io.FontGlobalScale = uiScale;
+    ImGui::GetStyle().ScaleAllSizes(uiScale);
+    ImGui_ImplAndroid_Init(static_cast<ANativeWindow*>(platform.nativeWindow()));
+#else
+    ImGui_ImplGlfw_InitForVulkan(static_cast<GLFWwindow*>(platform.nativeWindow()), true);
+#endif
     ImGui::StyleColorsDark();
 
-    ImGui_ImplGlfw_InitForVulkan(window, true);
     ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, imguiVulkanLoader);
 
     VkPipelineRenderingCreateInfo pipelineRendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -67,7 +83,11 @@ void ImGuiLayer::shutdown()
     }
 
     ImGui_ImplVulkan_Shutdown();
+#if defined(__ANDROID__)
+    ImGui_ImplAndroid_Shutdown();
+#else
     ImGui_ImplGlfw_Shutdown();
+#endif
     ImGui::DestroyContext();
 
     m_context = nullptr;
@@ -76,7 +96,11 @@ void ImGuiLayer::shutdown()
 void ImGuiLayer::newFrame()
 {
     ImGui_ImplVulkan_NewFrame();
+#if defined(__ANDROID__)
+    ImGui_ImplAndroid_NewFrame();
+#else
     ImGui_ImplGlfw_NewFrame();
+#endif
     ImGui::NewFrame();
 }
 

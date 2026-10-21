@@ -3,15 +3,12 @@
 #include "common/Log.h"
 #include "vulkan/Context.h"
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
 #include <algorithm>
 #include <limits>
 
-void Swapchain::init(Context& context, GLFWwindow* window, uint32_t width, uint32_t height)
+void Swapchain::init(Context& context, uint32_t width, uint32_t height)
 {
-    create(context, window, width, height, VK_NULL_HANDLE);
+    create(context, width, height, VK_NULL_HANDLE);
 }
 
 void Swapchain::shutdown(Context& context)
@@ -35,7 +32,7 @@ void Swapchain::destroy(Context& context)
     }
 }
 
-void Swapchain::create(Context& context, GLFWwindow* window, uint32_t width, uint32_t height, VkSwapchainKHR old)
+void Swapchain::create(Context& context, uint32_t width, uint32_t height, VkSwapchainKHR old)
 {
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context.physicalDevice, context.surface, &caps);
@@ -45,13 +42,18 @@ void Swapchain::create(Context& context, GLFWwindow* window, uint32_t width, uin
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(context.physicalDevice, context.surface, &formatCount, formats.data());
 
-    VkSurfaceFormatKHR surfaceFormat = formats.empty() ? VkSurfaceFormatKHR{VK_FORMAT_B8G8R8A8_UNORM,
-                                                                          VK_COLOR_SPACE_SRGB_NONLINEAR_KHR}
-                                                       : formats[0];
+#if defined(__ANDROID__)
+    const VkFormat preferredFormat = VK_FORMAT_R8G8B8A8_UNORM;
+#else
+    const VkFormat preferredFormat = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
+
+    VkSurfaceFormatKHR surfaceFormat = formats.empty()
+                                           ? VkSurfaceFormatKHR{preferredFormat, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR}
+                                           : formats[0];
     for (const auto& candidate : formats)
     {
-        if (candidate.format == VK_FORMAT_B8G8R8A8_UNORM &&
-            candidate.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        if (candidate.format == preferredFormat && candidate.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
         {
             surfaceFormat = candidate;
             break;
@@ -81,11 +83,22 @@ void Swapchain::create(Context& context, GLFWwindow* window, uint32_t width, uin
         extent.height = std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
     }
 
+    if (extent.width == 0 || extent.height == 0)
+    {
+        RT_LOG("Swapchain has zero extent");
+        return;
+    }
+
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
     {
         imageCount = caps.maxImageCount;
     }
+
+    // 不实现预旋转，交给 Android 合成器处理；否则横屏画面会被旋转 90°
+    const VkSurfaceTransformFlagBitsKHR preTransform =
+        (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                                                         : caps.currentTransform;
 
     VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     info.surface = context.surface;
@@ -96,7 +109,7 @@ void Swapchain::create(Context& context, GLFWwindow* window, uint32_t width, uin
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    info.preTransform = caps.currentTransform;
+    info.preTransform = preTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = presentMode;
     info.clipped = VK_TRUE;
@@ -138,9 +151,9 @@ void Swapchain::create(Context& context, GLFWwindow* window, uint32_t width, uin
            static_cast<int>(format));
 }
 
-void Swapchain::recreate(Context& context, GLFWwindow* window, uint32_t width, uint32_t height)
+void Swapchain::recreate(Context& context, uint32_t width, uint32_t height)
 {
-    if (width == 0 || height == 0)
+    if (width == 0 || height == 0 || context.surface == VK_NULL_HANDLE)
     {
         return;
     }
@@ -155,7 +168,7 @@ void Swapchain::recreate(Context& context, GLFWwindow* window, uint32_t width, u
     views.clear();
     images.clear();
 
-    create(context, window, width, height, old);
+    create(context, width, height, old);
 }
 
 VkResult Swapchain::acquireNext(Context& context, VkSemaphore semaphore, uint32_t* imageIndex)

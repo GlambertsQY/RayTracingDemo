@@ -3,12 +3,12 @@
 #include <volk.h>
 
 class Context;
-struct GLFWwindow;
+class Platform;
 
 class ImGuiLayer
 {
 public:
-    void init(Context& context, GLFWwindow* window, VkFormat colorFormat, uint32_t imageCount);
+    void init(Context& context, Platform& platform, VkFormat colorFormat, uint32_t imageCount);
     void shutdown();
 
     void newFrame();

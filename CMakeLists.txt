@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(THIRD_PARTY "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+set(RTDEMO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CommonSources.cmake)
 
 find_package(Vulkan REQUIRED)
 
@@ -67,6 +69,7 @@ set(SHADER_FILES
   accumulate.comp
   tonemap.vert
   tonemap.frag
+  path_tracer.comp
 )
 
 set(SHADER_SPV "")
@@ -88,18 +91,8 @@ add_custom_target(shaders ALL DEPENDS ${SHADER_SPV})
 # ----------------------------------------------------------------- application
 add_executable(RayTracingDemo
   src/main.cpp
-  src/app/Application.cpp
-  src/app/Camera.cpp
-  src/vulkan/Context.cpp
-  src/vulkan/Swapchain.cpp
-  src/vulkan/Resources.cpp
-  src/scene/Scene.cpp
-  src/scene/GltfLoader.cpp
-  src/scene/TextureLoader.cpp
-  src/render/GpuScene.cpp
-  src/render/AccelerationStructure.cpp
-  src/render/RayTracer.cpp
-  src/ui/ImGuiLayer.cpp
+  src/platform/PlatformWindows.cpp
+  ${RTDEMO_COMMON_SOURCES}
 )
 add_dependencies(RayTracingDemo shaders)
 

@@ -72,6 +72,8 @@ struct FrameConstants
     float envIntensity;
     float fireflyClamp;
     float pad0;
+    vec2 outputResolution;
+    uint neeBounces;
 };
 
 layout(scalar, set = 0, binding = 1) uniform FrameConstantsBlock

@@ -1,17 +1,14 @@
 #include "render/RayTracer.h"
 
+#include "common/Assets.h"
 #include "common/Log.h"
 #include "vulkan/Context.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace
 {
@@ -22,35 +19,19 @@ T alignUp(T value, T alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
 }
-
-std::string shaderDirectory()
-{
-#ifdef _WIN32
-    char buffer[MAX_PATH]{};
-    GetModuleFileNameA(nullptr, buffer, MAX_PATH);
-    std::string path(buffer);
-    const size_t slash = path.find_last_of("\\/");
-    return (slash == std::string::npos ? std::string(".") : path.substr(0, slash)) + "/shaders/";
-#else
-    return "shaders/";
-#endif
-}
 } // namespace
 
 VkShaderModule RayTracer::loadShader(const char* name) const
 {
-    const std::string path = shaderDirectory() + name;
-    std::ifstream file(path, std::ios::ate | std::ios::binary);
-    if (!file.is_open())
+    std::vector<uint8_t> code;
+    if (!assets::readShader(name, code))
     {
-        RT_FATAL("Failed to open shader: %s", path.c_str());
+        RT_FATAL("Failed to load shader: %s", name);
     }
-
-    const size_t size = static_cast<size_t>(file.tellg());
-    std::vector<char> code(size);
-    file.seekg(0);
-    file.read(code.data(), static_cast<std::streamsize>(size));
-    file.close();
+    if (code.empty() || code.size() % 4 != 0)
+    {
+        RT_FATAL("Invalid SPIR-V shader: %s", name);
+    }
 
     VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     info.codeSize = code.size();
@@ -59,7 +40,7 @@ VkShaderModule RayTracer::loadShader(const char* name) const
     VkShaderModule module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(m_context->device, &info, nullptr, &module) != VK_SUCCESS)
     {
-        RT_FATAL("Failed to create shader module: %s", path.c_str());
+        RT_FATAL("Failed to create shader module: %s", name);
     }
     return module;
 }
@@ -70,6 +51,25 @@ void RayTracer::init(Context& context, Resources& resources, VkFormat colorForma
     m_resources = &resources;
     m_colorFormat = colorFormat;
 
+#if defined(__ANDROID__)
+    // 部分移动驱动在 RT pipeline 着色器编译阶段直接 abort，Android 仅使用 ray query compute
+    m_rayTracingAvailable = false;
+#else
+    m_rayTracingAvailable = context.rayTracingPipelineSupported;
+#endif
+    m_rayQueryAvailable = context.rayQuerySupported;
+
+#if defined(__ANDROID__)
+    m_backend = Backend::RayQueryCompute;
+#else
+    m_backend = m_rayTracingAvailable ? Backend::RayTracingPipeline : Backend::RayQueryCompute;
+    const char* forceCompute = std::getenv("RTDEMO_COMPUTE");
+    if (forceCompute && std::strcmp(forceCompute, "1") == 0)
+    {
+        m_backend = Backend::RayQueryCompute;
+    }
+#endif
+
     VkDescriptorSetLayoutBinding bindings[11]{};
     for (uint32_t i = 0; i < 11; ++i)
     {
@@ -78,13 +78,13 @@ void RayTracer::init(Context& context, Resources& resources, VkFormat colorForma
     }
 
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                              VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     const VkShaderStageFlags geometryStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                                              VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+                                              VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
     for (uint32_t i = 2; i <= 7; ++i)
     {
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -125,88 +125,119 @@ void RayTracer::createPipelines(VkFormat colorFormat)
 {
     VkDevice device = m_context->device;
 
-    // ------------------------------------------------------------------- RT
-    VkShaderModule rgen = loadShader("path_tracer.rgen.spv");
-    VkShaderModule rchit = loadShader("path_tracer.rchit.spv");
-    VkShaderModule rmiss = loadShader("path_tracer.rmiss.spv");
-    VkShaderModule rahit = loadShader("shadow.rahit.spv");
-    VkShaderModule alphaAhit = loadShader("alpha.rahit.spv");
-    VkShaderModule smiss = loadShader("shadow.rmiss.spv");
-
-    VkPipelineShaderStageCreateInfo stages[6]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    stages[0].module = rgen;
-    stages[0].pName = "main";
-
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[1].module = rmiss;
-    stages[1].pName = "main";
-
-    stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[2].module = smiss;
-    stages[2].pName = "main";
-
-    stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[3].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    stages[3].module = rchit;
-    stages[3].pName = "main";
-
-    stages[4].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    stages[4].module = rahit;
-    stages[4].pName = "main";
-
-    stages[5].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[5].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    stages[5].module = alphaAhit;
-    stages[5].pName = "main";
-
-    VkRayTracingShaderGroupCreateInfoKHR groups[5]{};
-    for (int i = 0; i < 5; ++i)
+    // ------------------------------------------------- ray tracing pipeline
+    if (m_rayTracingAvailable)
     {
-        groups[i].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        groups[i].generalShader = VK_SHADER_UNUSED_KHR;
-        groups[i].closestHitShader = VK_SHADER_UNUSED_KHR;
-        groups[i].anyHitShader = VK_SHADER_UNUSED_KHR;
-        groups[i].intersectionShader = VK_SHADER_UNUSED_KHR;
+        VkShaderModule rgen = loadShader("path_tracer.rgen.spv");
+        VkShaderModule rchit = loadShader("path_tracer.rchit.spv");
+        VkShaderModule rmiss = loadShader("path_tracer.rmiss.spv");
+        VkShaderModule rahit = loadShader("shadow.rahit.spv");
+        VkShaderModule alphaAhit = loadShader("alpha.rahit.spv");
+        VkShaderModule smiss = loadShader("shadow.rmiss.spv");
+
+        VkPipelineShaderStageCreateInfo stages[6]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        stages[0].module = rgen;
+        stages[0].pName = "main";
+
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+        stages[1].module = rmiss;
+        stages[1].pName = "main";
+
+        stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+        stages[2].module = smiss;
+        stages[2].pName = "main";
+
+        stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[3].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        stages[3].module = rchit;
+        stages[3].pName = "main";
+
+        stages[4].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+        stages[4].module = rahit;
+        stages[4].pName = "main";
+
+        stages[5].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[5].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+        stages[5].module = alphaAhit;
+        stages[5].pName = "main";
+
+        VkRayTracingShaderGroupCreateInfoKHR groups[5]{};
+        for (int i = 0; i < 5; ++i)
+        {
+            groups[i].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+            groups[i].generalShader = VK_SHADER_UNUSED_KHR;
+            groups[i].closestHitShader = VK_SHADER_UNUSED_KHR;
+            groups[i].anyHitShader = VK_SHADER_UNUSED_KHR;
+            groups[i].intersectionShader = VK_SHADER_UNUSED_KHR;
+        }
+        groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[0].generalShader = 0;
+        groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[1].generalShader = 1;
+        groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[2].generalShader = 2;
+        groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[3].closestHitShader = 3;
+        groups[3].anyHitShader = 5;
+        groups[4].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[4].anyHitShader = 4;
+
+        VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
+        pipelineInfo.stageCount = 6;
+        pipelineInfo.pStages = stages;
+        pipelineInfo.groupCount = 5;
+        pipelineInfo.pGroups = groups;
+        pipelineInfo.maxPipelineRayRecursionDepth = 1;
+        pipelineInfo.layout = m_pipelineLayout;
+
+        if (vkCreateRayTracingPipelinesKHR(m_context->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo,
+                                           nullptr, &m_rtPipeline) != VK_SUCCESS)
+        {
+            RT_LOG("Failed to create ray tracing pipeline; falling back to ray query compute");
+            m_rayTracingAvailable = false;
+            m_rtPipeline = VK_NULL_HANDLE;
+            if (m_backend == Backend::RayTracingPipeline)
+            {
+                m_backend = Backend::RayQueryCompute;
+            }
+        }
+
+        vkDestroyShaderModule(device, rgen, nullptr);
+        vkDestroyShaderModule(device, rchit, nullptr);
+        vkDestroyShaderModule(device, rmiss, nullptr);
+        vkDestroyShaderModule(device, rahit, nullptr);
+        vkDestroyShaderModule(device, alphaAhit, nullptr);
+        vkDestroyShaderModule(device, smiss, nullptr);
+
+        if (m_rtPipeline != VK_NULL_HANDLE)
+        {
+            createSBT();
+        }
     }
-    groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[0].generalShader = 0;
-    groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[1].generalShader = 1;
-    groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[2].generalShader = 2;
-    groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    groups[3].closestHitShader = 3;
-    groups[3].anyHitShader = 5;
-    groups[4].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    groups[4].anyHitShader = 4;
 
-    VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
-    pipelineInfo.stageCount = 6;
-    pipelineInfo.pStages = stages;
-    pipelineInfo.groupCount = 5;
-    pipelineInfo.pGroups = groups;
-    pipelineInfo.maxPipelineRayRecursionDepth = 1;
-    pipelineInfo.layout = m_pipelineLayout;
-
-    if (vkCreateRayTracingPipelinesKHR(m_context->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                                       &m_rtPipeline) != VK_SUCCESS)
+    // ------------------------------------------------ ray query compute path
+    if (m_rayQueryAvailable)
     {
-        RT_FATAL("Failed to create ray tracing pipeline");
+        RT_LOG("Creating ray query compute pipeline");
+        VkShaderModule module = loadShader("path_tracer.comp.spv");
+        VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module = module;
+        info.stage.pName = "main";
+        info.layout = m_pipelineLayout;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &m_rayQueryPipeline) != VK_SUCCESS)
+        {
+            RT_FATAL("Failed to create ray query compute pipeline");
+        }
+        vkDestroyShaderModule(device, module, nullptr);
+        RT_LOG("Ray query compute pipeline ready");
     }
-
-    vkDestroyShaderModule(device, rgen, nullptr);
-    vkDestroyShaderModule(device, rchit, nullptr);
-    vkDestroyShaderModule(device, rmiss, nullptr);
-    vkDestroyShaderModule(device, rahit, nullptr);
-    vkDestroyShaderModule(device, alphaAhit, nullptr);
-    vkDestroyShaderModule(device, smiss, nullptr);
-
-    createSBT();
 
     // ------------------------------------------------------------- accumulate
     {
@@ -301,6 +332,8 @@ void RayTracer::createPipelines(VkFormat colorFormat)
         vkDestroyShaderModule(device, vert, nullptr);
         vkDestroyShaderModule(device, frag, nullptr);
     }
+
+    RT_LOG("Ray tracing backend: %s", backendName());
 }
 
 void RayTracer::createSBT()
@@ -464,15 +497,39 @@ void RayTracer::createDescriptors(const GpuScene& scene)
     m_sceneBound = true;
 }
 
-void RayTracer::setScene(const GpuScene& scene, VkExtent2D extent)
+void RayTracer::setScene(const GpuScene& scene, VkExtent2D renderExtent, VkExtent2D outputExtent)
 {
     vkDeviceWaitIdle(m_context->device);
 
-    if (extent.width != m_extent.width || extent.height != m_extent.height || m_radiance.image == VK_NULL_HANDLE)
+    if (renderExtent.width != m_extent.width || renderExtent.height != m_extent.height ||
+        m_radiance.image == VK_NULL_HANDLE)
     {
-        createSizeImages(extent);
+        createSizeImages(renderExtent);
     }
+    m_outputExtent = outputExtent;
     createDescriptors(scene);
+}
+
+void RayTracer::setBackend(Backend backend)
+{
+    if (backendAvailable(backend))
+    {
+        m_backend = backend;
+    }
+}
+
+bool RayTracer::backendAvailable(Backend backend) const
+{
+    if (backend == Backend::RayTracingPipeline)
+    {
+        return m_rayTracingAvailable && m_rtPipeline != VK_NULL_HANDLE;
+    }
+    return m_rayQueryAvailable && m_rayQueryPipeline != VK_NULL_HANDLE;
+}
+
+const char* RayTracer::backendName() const
+{
+    return m_backend == Backend::RayTracingPipeline ? "RayTracingPipeline" : "RayQueryCompute";
 }
 
 void RayTracer::render(VkCommandBuffer cmd, const FrameConstants& constants, bool resetAccumulation,
@@ -501,17 +558,37 @@ void RayTracer::render(VkCommandBuffer cmd, const FrameConstants& constants, boo
                              1, &barrier, 0, nullptr, 0, nullptr);
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
-    vkCmdTraceRaysKHR(cmd, &m_raygenRegion, &m_missRegion, &m_hitRegion, &m_callableRegion, m_extent.width,
-                      m_extent.height, 1);
+    const bool useRayTracing = m_backend == Backend::RayTracingPipeline && backendAvailable(Backend::RayTracingPipeline);
+    const bool useRayQuery = !useRayTracing && backendAvailable(Backend::RayQueryCompute);
+
+    if (useRayTracing)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &m_set, 0,
+                                nullptr);
+        vkCmdTraceRaysKHR(cmd, &m_raygenRegion, &m_missRegion, &m_hitRegion, &m_callableRegion, m_extent.width,
+                          m_extent.height, 1);
+    }
+    else if (useRayQuery)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rayQueryPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
+        vkCmdDispatch(cmd, (m_extent.width + 7) / 8, (m_extent.height + 7) / 8, 1);
+    }
+    else
+    {
+        return;
+    }
+
+    const VkPipelineStageFlags traceStage =
+        useRayTracing ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        vkCmdPipelineBarrier(cmd, traceStage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
     }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_accumulatePipeline);
@@ -528,6 +605,9 @@ void RayTracer::render(VkCommandBuffer cmd, const FrameConstants& constants, boo
 
     transitionImage(cmd, colorImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+    const VkExtent2D outputExtent =
+        m_outputExtent.width > 0 && m_outputExtent.height > 0 ? m_outputExtent : m_extent;
+
     VkRenderingAttachmentInfo colorAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     colorAttachment.imageView = colorView;
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -536,16 +616,16 @@ void RayTracer::render(VkCommandBuffer cmd, const FrameConstants& constants, boo
     colorAttachment.clearValue = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
 
     VkRenderingInfo renderInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    renderInfo.renderArea = {{0, 0}, m_extent};
+    renderInfo.renderArea = {{0, 0}, outputExtent};
     renderInfo.layerCount = 1;
     renderInfo.colorAttachmentCount = 1;
     renderInfo.pColorAttachments = &colorAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
 
-    VkViewport viewport{0.0f, 0.0f, static_cast<float>(m_extent.width), static_cast<float>(m_extent.height), 0.0f,
-                        1.0f};
-    VkRect2D scissor{{0, 0}, m_extent};
+    VkViewport viewport{0.0f, 0.0f, static_cast<float>(outputExtent.width),
+                        static_cast<float>(outputExtent.height), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, outputExtent};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
@@ -574,6 +654,11 @@ void RayTracer::shutdown()
     {
         vkDestroyPipeline(device, m_rtPipeline, nullptr);
         m_rtPipeline = VK_NULL_HANDLE;
+    }
+    if (m_rayQueryPipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, m_rayQueryPipeline, nullptr);
+        m_rayQueryPipeline = VK_NULL_HANDLE;
     }
     if (m_accumulatePipeline != VK_NULL_HANDLE)
     {

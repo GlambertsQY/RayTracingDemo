@@ -6,13 +6,16 @@
 #include <cstdint>
 #include <vector>
 
-struct GLFWwindow;
+class Platform;
 
 class Context
 {
 public:
-    void init(GLFWwindow* window);
+    bool init(Platform& platform);
     void shutdown();
+
+    bool createSurface(Platform& platform);
+    void destroySurface();
 
     VkInstance       instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
@@ -36,10 +39,18 @@ public:
     uint32_t apiVersion = VK_API_VERSION_1_3;
     bool     validationEnabled = false;
 
+    bool rayQuerySupported = false;
+    bool rayTracingPipelineSupported = false;
+
 private:
-    void createInstance(GLFWwindow* window);
+    void createInstance(Platform& platform);
     void pickPhysicalDevice();
     void createDevice();
     void createAllocator();
-    bool supportsRayTracing(VkPhysicalDevice device) const;
+
+    bool supportsRayQuery(VkPhysicalDevice device, const std::vector<VkExtensionProperties>& extensions) const;
+    bool supportsRayTracingPipeline(VkPhysicalDevice device,
+                                    const std::vector<VkExtensionProperties>& extensions) const;
+    static bool extensionAvailable(const std::vector<VkExtensionProperties>& extensions, const char* name);
+    static std::vector<VkExtensionProperties> enumerateDeviceExtensions(VkPhysicalDevice device);
 };

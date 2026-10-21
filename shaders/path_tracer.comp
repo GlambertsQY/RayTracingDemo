@@ -1,0 +1,301 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "shared/common.glsl"
+#include "shared/brdf.glsl"
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT gTlas;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct PathHit
+{
+    bool  hit;
+    float t;
+    uint  instance;
+    uint  primitive;
+    vec3  normal;
+    vec2  uv;
+};
+
+// 阴影射线：命中任意不透明表面即视为遮挡（alpha mask 按不透明处理）
+bool traceOcclusion(vec3 origin, vec3 direction, float maxDistance)
+{
+    if (!isFiniteVec(origin) || !isFiniteVec(direction) || !(maxDistance > 0.0))
+    {
+        return false;
+    }
+
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, gTlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, origin,
+                          0.005, direction, maxDistance);
+    while (rayQueryProceedEXT(query))
+    {
+    }
+    return rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+PathHit tracePrimary(vec3 origin, vec3 direction)
+{
+    PathHit hit;
+    hit.hit = false;
+
+    // 主射线使用 Opaque 标志，由实现自动提交最近命中；
+    // alpha mask 在 compute 路径中按不透明处理（与阴影射线一致）。
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, gTlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.005, direction, 1e30);
+    while (rayQueryProceedEXT(query))
+    {
+    }
+
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionTriangleEXT)
+    {
+        return hit;
+    }
+
+    hit.hit = true;
+    hit.t = rayQueryGetIntersectionTEXT(query, true);
+    hit.instance = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true));
+    hit.primitive = uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true));
+
+    const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
+    vec3 p0;
+    vec3 p1;
+    vec3 p2;
+    vec3 n0;
+    vec3 n1;
+    vec3 n2;
+    vec2 uv0;
+    vec2 uv1;
+    vec2 uv2;
+    fetchTriangle(hit.instance, hit.primitive, p0, p1, p2, n0, n1, n2, uv0, uv1, uv2);
+
+    const mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(query, true);
+    const vec3 world0 = objectToWorldPoint(objectToWorld, p0);
+    const vec3 world1 = objectToWorldPoint(objectToWorld, p1);
+    const vec3 world2 = objectToWorldPoint(objectToWorld, p2);
+
+    const float w0 = 1.0 - bary.x - bary.y;
+    hit.normal = objectToWorldNormal(objectToWorld, n0) * w0 + objectToWorldNormal(objectToWorld, n1) * bary.x +
+                 objectToWorldNormal(objectToWorld, n2) * bary.y;
+    if (!isFiniteVec(hit.normal) || dot(hit.normal, hit.normal) < 1e-10)
+    {
+        hit.normal = cross(world1 - world0, world2 - world0);
+    }
+    if (!isFiniteVec(hit.normal) || dot(hit.normal, hit.normal) < 1e-10)
+    {
+        hit.normal = vec3(0.0, 1.0, 0.0);
+    }
+    hit.normal = normalize(hit.normal);
+    hit.uv = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+    return hit;
+}
+
+vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
+{
+    vec3 result = vec3(0.0);
+    if (!isFiniteVec(hitPos) || !isFiniteVec(normal) || dot(normal, normal) < 1e-8)
+    {
+        return result;
+    }
+
+    const vec3 sunDirection = normalize(fc.sunDir.xyz);
+    const float sunCos = dot(normal, sunDirection);
+    if (sunCos > 0.0 && fc.sunColor.w > 0.0)
+    {
+        if (!traceOcclusion(hitPos + normal * 0.005, sunDirection, 1e30))
+        {
+            result += diffuseAlbedo * kInvPi * fc.sunColor.rgb * fc.sunColor.w * sunCos;
+        }
+    }
+
+    const int lightCount = int(fc.lightCount);
+    if (lightCount > 0)
+    {
+        // 均匀随机选择一盏灯，乘以灯数作为 pdf 补偿；移动端避免每跳遍历所有灯
+        const int lightIndex = min(int(rand() * float(lightCount)), lightCount - 1);
+        const GpuLight light = gLights[lightIndex];
+
+        vec3 surfacePoint;
+        vec3 lightNormal;
+        float area;
+        if (light.position.w < 0.5)
+        {
+            surfacePoint = light.position.xyz + light.u.xyz * (rand() * 2.0 - 1.0) +
+                           light.v.xyz * (rand() * 2.0 - 1.0);
+            lightNormal = normalize(cross(light.u.xyz, light.v.xyz));
+            area = 4.0 * length(cross(light.u.xyz, light.v.xyz));
+        }
+        else
+        {
+            const vec3 offset = randomUnitVector();
+            surfacePoint = light.position.xyz + offset * light.emission.w;
+            lightNormal = offset;
+            area = 4.0 * kPi * light.emission.w * light.emission.w;
+        }
+
+        vec3 toLight = surfacePoint - hitPos;
+        const float distanceSquared = max(dot(toLight, toLight), 1e-6);
+        const float distance = sqrt(distanceSquared);
+        toLight /= distance;
+
+        const float surfaceCos = dot(normal, toLight);
+        if (surfaceCos > 0.0)
+        {
+            const float lightCos = light.position.w < 0.5 ? abs(dot(lightNormal, -toLight))
+                                                          : max(dot(lightNormal, -toLight), 0.0);
+            if (lightCos > 0.0 &&
+                !traceOcclusion(hitPos + normal * 0.005, toLight, max(distance - 0.01, 0.001)))
+            {
+                result += diffuseAlbedo * kInvPi * light.emission.rgb * surfaceCos * lightCos * area /
+                          distanceSquared * float(lightCount);
+            }
+        }
+    }
+
+    return result;
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(fc.resolution.x) || pixel.y >= int(fc.resolution.y))
+    {
+        return;
+    }
+
+    const int sampleCount = max(int(fc.samplesPerFrame), 1);
+    vec3 total = vec3(0.0);
+
+    for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+    {
+        seedRng(gl_GlobalInvocationID, uint(sampleIndex));
+
+        const vec2 jitter = vec2(rand(), rand());
+        vec2 ndc = ((vec2(pixel) + jitter) / fc.resolution) * 2.0 - 1.0;
+        ndc.y = -ndc.y;
+
+        const float aspect = fc.resolution.x / max(fc.resolution.y, 1.0);
+        const float tanHalf = tan(fc.fov * 0.5);
+        const vec3 rayDirection = normalize(fc.camForward.xyz + ndc.x * tanHalf * aspect * fc.camRight.xyz +
+                                            ndc.y * tanHalf * fc.camUp.xyz);
+
+        vec3 origin = fc.camPos.xyz;
+        vec3 direction = rayDirection;
+        vec3 throughput = vec3(1.0);
+        vec3 radiance = vec3(0.0);
+
+        const int maxBounces = max(int(fc.maxBounces), 1);
+        for (int bounce = 0; bounce < maxBounces; ++bounce)
+        {
+            const PathHit hit = tracePrimary(origin, direction);
+            if (!hit.hit)
+            {
+                radiance += throughput * skyRadiance(direction);
+                break;
+            }
+
+            const vec3 hitPosition = origin + direction * hit.t;
+            const vec3 geometricNormal = hit.normal;
+            vec3 normal = geometricNormal;
+            const vec3 view = -direction;
+            if (dot(normal, view) < 0.0)
+            {
+                normal = -normal;
+            }
+
+            const GpuMaterial material = getMaterial(hit.instance);
+
+            vec4 base = material.baseColor;
+            if (material.baseColorTex >= 0)
+            {
+                base *= sampleTexture(material.baseColorTex, hit.uv);
+            }
+
+            vec2 metallicRoughness = vec2(1.0);
+            if (material.mrTex >= 0)
+            {
+                // glTF: G = roughness, B = metallic
+                metallicRoughness = sampleTexture(material.mrTex, hit.uv).gb;
+            }
+
+            const vec3 albedo = base.rgb;
+            const float metallic = clamp(material.metallic * metallicRoughness.y, 0.0, 1.0);
+            const float roughness = clamp(material.roughness * metallicRoughness.x, 0.03, 1.0);
+            const vec3 diffuseAlbedo = albedo * (1.0 - metallic);
+            const bool isGlass = material.emissive.w > 0.5;
+
+            radiance += throughput * material.emissive.rgb;
+
+            if (!isGlass && metallic < 0.5 && bounce < int(fc.neeBounces))
+            {
+                // 通过 fc.neeBounces 控制 NEE 层数；移动端默认仅主命中做 NEE
+                radiance += throughput * explicitLighting(hitPosition, normal, diffuseAlbedo);
+            }
+
+            const bool entering = dot(geometricNormal, direction) < 0.0;
+            const vec3 refractionNormal = entering ? geometricNormal : -geometricNormal;
+            const float nDotV = max(dot(refractionNormal, -direction), 1e-3);
+
+            if (isGlass)
+            {
+                const float fresnel = fresnelDielectric(nDotV, material.ior);
+                vec3 nextDirection;
+                if (rand() < fresnel)
+                {
+                    nextDirection = reflect(direction, refractionNormal);
+                }
+                else
+                {
+                    const float eta = entering ? (1.0 / material.ior) : material.ior;
+                    nextDirection = refract(direction, refractionNormal, eta);
+                    if (dot(nextDirection, nextDirection) < 1e-6 || any(isnan(nextDirection)))
+                    {
+                        nextDirection = reflect(direction, refractionNormal);
+                    }
+                }
+                direction = normalize(nextDirection);
+                origin = hitPosition + direction * 0.005;
+            }
+            else if (metallic > 0.5)
+            {
+                vec3 weight;
+                vec3 nextDirection;
+                if (!sampleMetallicBrdf(normal, view, albedo, roughness, nextDirection, weight))
+                {
+                    break;
+                }
+                throughput *= weight;
+                direction = nextDirection;
+                origin = hitPosition + direction * 0.005;
+            }
+            else
+            {
+                direction = cosineHemisphere(normal);
+                throughput *= diffuseAlbedo;
+                origin = hitPosition + direction * 0.005;
+            }
+
+            if (!isFiniteVec(direction) || dot(direction, direction) < 1e-8)
+            {
+                break;
+            }
+
+            if (bounce >= 3)
+            {
+                const float survival = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+                if (rand() > survival)
+                {
+                    break;
+                }
+                throughput /= survival;
+            }
+        }
+
+        total += radiance;
+    }
+
+    imageStore(gRadianceImage, pixel, vec4(total / float(sampleCount), 1.0));
+}

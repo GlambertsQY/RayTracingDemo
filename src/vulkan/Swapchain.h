@@ -5,14 +5,13 @@
 #include <vector>
 
 class Context;
-struct GLFWwindow;
 
 class Swapchain
 {
 public:
-    void init(Context& context, GLFWwindow* window, uint32_t width, uint32_t height);
+    void init(Context& context, uint32_t width, uint32_t height);
     void shutdown(Context& context);
-    void recreate(Context& context, GLFWwindow* window, uint32_t width, uint32_t height);
+    void recreate(Context& context, uint32_t width, uint32_t height);
     VkResult acquireNext(Context& context, VkSemaphore semaphore, uint32_t* imageIndex);
     VkResult present(Context& context, VkQueue queue, VkSemaphore waitSemaphore, uint32_t imageIndex);
 
@@ -25,7 +24,7 @@ public:
     VkSwapchainKHR handle() const { return m_swapchain; }
 
 private:
-    void create(Context& context, GLFWwindow* window, uint32_t width, uint32_t height, VkSwapchainKHR old);
+    void create(Context& context, uint32_t width, uint32_t height, VkSwapchainKHR old);
     void destroy(Context& context);
 
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;

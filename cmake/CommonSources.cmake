@@ -1,0 +1,15 @@
+set(RTDEMO_COMMON_SOURCES
+  ${RTDEMO_ROOT}/src/app/Application.cpp
+  ${RTDEMO_ROOT}/src/app/Camera.cpp
+  ${RTDEMO_ROOT}/src/common/Assets.cpp
+  ${RTDEMO_ROOT}/src/vulkan/Context.cpp
+  ${RTDEMO_ROOT}/src/vulkan/Swapchain.cpp
+  ${RTDEMO_ROOT}/src/vulkan/Resources.cpp
+  ${RTDEMO_ROOT}/src/scene/Scene.cpp
+  ${RTDEMO_ROOT}/src/scene/GltfLoader.cpp
+  ${RTDEMO_ROOT}/src/scene/TextureLoader.cpp
+  ${RTDEMO_ROOT}/src/render/GpuScene.cpp
+  ${RTDEMO_ROOT}/src/render/AccelerationStructure.cpp
+  ${RTDEMO_ROOT}/src/render/RayTracer.cpp
+  ${RTDEMO_ROOT}/src/ui/ImGuiLayer.cpp
+)

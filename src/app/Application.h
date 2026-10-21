@@ -11,14 +11,17 @@
 #include "vulkan/Swapchain.h"
 
 #include <glm/glm.hpp>
+
+#include <chrono>
 #include <string>
 #include <vector>
+
+class Platform;
+struct FrameInput;
 
 #ifdef RTDEMO_HAVE_RENDERDOC
 #include <renderdoc_app.h>
 #endif
-
-struct GLFWwindow;
 
 struct Options
 {
@@ -33,18 +36,22 @@ struct Options
 class Application
 {
 public:
-    bool init(const Options& options);
-    void run();
+    bool init(Platform& platform, const Options& options);
+    void run(Platform& platform);
     void shutdown();
 
 private:
+    void tick(Platform& platform, const FrameInput& input);
+    void applyInput(const FrameInput& input);
     void createFrameResources();
     void destroyFrameResources();
-    void recreateSwapchain();
+    void recreateSwapchain(bool force = false);
+    void suspend();
+    void resume();
+    void updateRenderExtent();
     void updateScene(int sceneIndex);
     void loadSceneIfNeeded(int sceneIndex);
     bool drawUI();
-    void processInput();
     void updateConstants();
     void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, bool resetAccumulation);
     void captureScreenshot(uint32_t imageIndex);
@@ -55,7 +62,7 @@ private:
     bool m_sceneLoaded[2]{false, false};
     int m_activeScene = -1;
 
-    GLFWwindow* m_window = nullptr;
+    Platform* m_platform = nullptr;
     Context m_context;
     Swapchain m_swapchain;
     Resources m_resources;
@@ -63,6 +70,9 @@ private:
     RayTracer m_rayTracer;
     ImGuiLayer m_ui;
     Camera m_camera;
+
+    bool m_uiInitialized = false;
+    bool m_suspended = false;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
@@ -76,10 +86,9 @@ private:
     uint32_t m_accumulatedFrames = 0;
     bool m_resetAccumulation = true;
     bool m_sceneChanged = false;
-    bool m_framebufferResized = false;
 
     int m_frameCount = 0;
-    double m_lastTime = 0.0;
+    std::chrono::steady_clock::time_point m_lastTime{};
     float m_fps = 0.0f;
     float m_frameMs = 0.0f;
 
@@ -88,6 +97,8 @@ private:
 
     uint32_t m_width = 0;
     uint32_t m_height = 0;
+    uint32_t m_renderWidth = 0;
+    uint32_t m_renderHeight = 0;
 
 #ifdef RTDEMO_HAVE_RENDERDOC
     RENDERDOC_API_1_7_0* m_renderDoc = nullptr;

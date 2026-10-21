@@ -48,9 +48,11 @@ vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
     }
 
     const int lightCount = int(fc.lightCount);
-    for (int i = 0; i < lightCount; ++i)
+    if (lightCount > 0)
     {
-        const GpuLight light = gLights[i];
+        // 均匀随机选择一盏灯，乘以灯数作为 pdf 补偿
+        const int lightIndex = min(int(rand() * float(lightCount)), lightCount - 1);
+        const GpuLight light = gLights[lightIndex];
 
         vec3 surfacePoint;
         vec3 lightNormal;
@@ -76,24 +78,17 @@ vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
         toLight /= distance;
 
         const float surfaceCos = dot(normal, toLight);
-        if (surfaceCos <= 0.0)
+        if (surfaceCos > 0.0)
         {
-            continue;
+            const float lightCos = light.position.w < 0.5 ? abs(dot(lightNormal, -toLight))
+                                                          : max(dot(lightNormal, -toLight), 0.0);
+            if (lightCos > 0.0 &&
+                !traceOcclusion(hitPos + normal * 0.005, toLight, max(distance - 0.01, 0.001)))
+            {
+                result += diffuseAlbedo * kInvPi * light.emission.rgb * surfaceCos * lightCos * area /
+                          distanceSquared * float(lightCount);
+            }
         }
-
-        const float lightCos = light.position.w < 0.5 ? abs(dot(lightNormal, -toLight))
-                                                      : max(dot(lightNormal, -toLight), 0.0);
-        if (lightCos <= 0.0)
-        {
-            continue;
-        }
-
-        if (traceOcclusion(hitPos + normal * 0.005, toLight, max(distance - 0.01, 0.001)))
-        {
-            continue;
-        }
-
-        result += diffuseAlbedo * kInvPi * light.emission.rgb * surfaceCos * lightCos * area / distanceSquared;
     }
 
     return result;
@@ -177,7 +172,7 @@ void main()
 
             radiance += throughput * material.emissive.rgb;
 
-            if (!isGlass && metallic < 0.5)
+            if (!isGlass && metallic < 0.5 && bounce < int(fc.neeBounces))
             {
                 radiance += throughput * explicitLighting(hitPosition, normal, diffuseAlbedo);
             }

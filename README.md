@@ -9,6 +9,7 @@
 ## 特性
 
 - **硬件光追路径追踪**：`VK_KHR_ray_tracing_pipeline` + `VK_KHR_acceleration_structure`，BLAS/TLAS + Shader Binding Table
+- **双渲染后端**：Windows 默认 RT 管线；Android 默认 `compute + VK_KHR_ray_query`（兼容 Adreno 等仅暴露 ray query 的移动 GPU），设备支持时可在 UI 切换
 - **迭代式弹射**：单 ray payload 内完成多跳（默认 4 跳），避免递归着色器与多 payload 开销
 - **NEE 直接光照**：每跳对解析光源做一次采样，配合 GGX 重要性采样与余弦加权漫反射
 - **材质系统**：metallic-roughness、法线贴图、Fresnel 玻璃、自发光、alpha mask
@@ -47,7 +48,7 @@
 | 库 | 版本 / commit |
 | --- | --- |
 | [imgui](https://github.com/ocornut/imgui) | `d88f238d` (v1.93.0-docking) |
-| [glfw](https://github.com/glfw/glfw) | `3.5.1` |
+| [glfw](https://github.com/glfw/glfw) | `3.5.1`（仅 Windows） |
 | [volk](https://github.com/zeux/volk) | `vulkan-sdk-1.4.357.0` |
 | [VulkanMemoryAllocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | `3aa9212` |
 | [glm](https://github.com/g-truc/glm) | `8d1fd52e` |
@@ -71,6 +72,27 @@ cmake --build --preset release
 ```
 
 生成的可执行文件位于 `build/Release/RayTracingDemo.exe`，编译后的 SPIR-V 会自动复制到同目录 `shaders/` 下。也可以直接打开 `build/RayTracingDemo.sln`。
+
+### Android（arm64-v8a）
+
+前置条件：
+
+- JDK 17
+- Android SDK Platform 35、Build-Tools 35.0.0
+- NDK `27.2.12479018`、CMake `3.22.1`
+- Vulkan SDK（提供 `glslc`；也可使用 NDK 的 shader-tools）
+- 支持 Vulkan 1.3 + `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` 的真机
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot"
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:Path += ";$env:ANDROID_HOME\platform-tools"
+
+cd android
+.\gradlew.bat :app:assembleRelease
+```
+
+产物为 `android/app/build/outputs/apk/release/app-release.apk`（使用调试签名，可直接 `adb install`）。日常调试可改用 `:app:assembleDebug`。`assets/Sponza` 存在时会自动打包进 APK；SPIR-V 在构建时嵌入原生库，不依赖 APK 资产路径。
 
 ## 场景资产
 
@@ -99,7 +121,21 @@ build\Release\RayTracingDemo.exe --scene sponza --width 1600 --height 900
 | `--screenshot <path>` | 退出前保存当前帧 PNG |
 | `--renderdoc-capture` | 在第 3 帧触发 RenderDoc 抓帧 |
 
-操作：`左键` 轨道旋转、`右键` 平移、`滚轮` 缩放、`F1` 显示/隐藏 UI。UI 面板可实时调整弹射次数、每帧采样数、曝光、太阳方位/高度、环境光强度、firefly clamp 等。
+Windows 调试时设置环境变量 `RTDEMO_COMPUTE=1` 可强制使用 ray query compute 后端，用于对比两种渲染路径。
+
+操作：`左键` 轨道旋转、`右键` 平移、`滚轮` 缩放、`F1` 显示/隐藏 UI。UI 面板可实时调整弹射次数、每帧采样数、渲染缩放、曝光、太阳方位/高度、环境光强度、firefly clamp 等。
+
+Android 运行：
+
+```powershell
+adb install -r android\app\build\outputs\apk\debug\app-debug.apk
+adb shell am start -n com.raytracingdemo.android/android.app.NativeActivity
+adb logcat -s RayTracingDemo
+```
+
+Android 操作：`单指` 旋转、`双指` 平移、`捏合` 缩放、`返回键` 切换 UI。默认渲染缩放 0.5、2 次弹射、NEE 1 跳、1 spp；启动日志会打印 GPU、Vulkan 版本、可用的光追扩展与最终后端。
+
+Android 性能（骁龙 8 Elite Gen 5 / Adreno 840 实测，1304×600 渲染）：程序化场景约 200–250 FPS；Sponza（26 万三角形）约 33–36 FPS。可在 UI 中调整 `Max bounces`、`NEE bounces` 和 `Render scale` 进一步取舍画质与帧率；建议使用 `assembleRelease` 构建以获得最佳性能。
 
 ## RenderDoc 抓帧
 
@@ -114,4 +150,7 @@ build\Release\RayTracingDemo.exe --scene sponza --width 1600 --height 900
 
 - 累积渲染在低采样数下仍有轻微噪点，需要多帧收敛
 - 阴影射线使用 `rayQuery` 并标记为 opaque，alpha mask 材质在阴影中按不透明处理
-- 仅支持 Windows / MSVC 工具链，未做跨平台验证
+- Android compute 路径的主射线同样按不透明处理，alpha mask 仅影响材质外观
+- Android 默认使用 `compute + VK_KHR_ray_query` 后端；设备不支持 ray query 时无法运行
+- Android 不支持 RenderDoc 抓帧与命令行截图，验证时使用 `adb exec-out screencap`
+- 移动端默认 0.5 渲染缩放、2 次弹射、NEE 1 跳；Sponza 负载较重，可继续降低渲染缩放

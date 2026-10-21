@@ -1,9 +1,7 @@
 #include "vulkan/Context.h"
 
 #include "common/Log.h"
-
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
+#include "platform/Platform.h"
 
 #include <algorithm>
 #include <cstring>
@@ -23,8 +21,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
     }
     return VK_FALSE;
 }
+} // namespace
 
-bool extensionAvailable(const std::vector<VkExtensionProperties>& extensions, const char* name)
+bool Context::extensionAvailable(const std::vector<VkExtensionProperties>& extensions, const char* name)
 {
     for (const auto& ext : extensions)
     {
@@ -35,25 +34,55 @@ bool extensionAvailable(const std::vector<VkExtensionProperties>& extensions, co
     }
     return false;
 }
-} // namespace
 
-void Context::init(GLFWwindow* window)
+std::vector<VkExtensionProperties> Context::enumerateDeviceExtensions(VkPhysicalDevice device)
+{
+    uint32_t extensionCount = 0;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
+    return extensions;
+}
+
+bool Context::init(Platform& platform)
 {
     if (volkInitialize() != VK_SUCCESS)
     {
-        RT_FATAL("volkInitialize failed: Vulkan loader not found");
+        RT_LOG("volkInitialize failed: Vulkan loader not found");
+        return false;
     }
 
-    createInstance(window);
+    createInstance(platform);
+    if (!createSurface(platform))
+    {
+        return false;
+    }
+
     pickPhysicalDevice();
+    if (physicalDevice == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
     createDevice();
+    if (device == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
     createAllocator();
+    if (allocator == VK_NULL_HANDLE)
+    {
+        return false;
+    }
 
     RT_LOG("GPU: %s (API %u.%u.%u)", props.deviceName, VK_VERSION_MAJOR(props.apiVersion),
            VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
+    RT_LOG("Ray tracing pipeline: %s", rayTracingPipelineSupported ? "supported" : "unavailable");
+    return true;
 }
 
-void Context::createInstance(GLFWwindow* window)
+void Context::createInstance(Platform& platform)
 {
     uint32_t layerCount = 0;
     vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
@@ -72,9 +101,7 @@ void Context::createInstance(GLFWwindow* window)
     }
 #endif
 
-    uint32_t glfwExtensionCount = 0;
-    const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-    std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    std::vector<const char*> extensions = platform.instanceExtensions();
     extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     const std::vector<const char*> validationLayers = {"VK_LAYER_KHRONOS_validation"};
@@ -113,25 +140,44 @@ void Context::createInstance(GLFWwindow* window)
         messengerInfo.pfnUserCallback = debugCallback;
         vkCreateDebugUtilsMessengerEXT(instance, &messengerInfo, nullptr, &debugMessenger);
     }
+}
 
-    if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS)
+bool Context::createSurface(Platform& platform)
+{
+    surface = platform.createSurface(instance);
+    return surface != VK_NULL_HANDLE;
+}
+
+void Context::destroySurface()
+{
+    if (surface != VK_NULL_HANDLE && instance != VK_NULL_HANDLE)
     {
-        RT_FATAL("Failed to create window surface");
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        surface = VK_NULL_HANDLE;
     }
 }
 
-bool Context::supportsRayTracing(VkPhysicalDevice device) const
+bool Context::supportsRayQuery(VkPhysicalDevice device,
+                               const std::vector<VkExtensionProperties>& extensions) const
 {
-    uint32_t extensionCount = 0;
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
-    std::vector<VkExtensionProperties> extensions(extensionCount);
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(device, &properties);
+    if (properties.apiVersion < VK_API_VERSION_1_3)
+    {
+        return false;
+    }
 
     return extensionAvailable(extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
-           extensionAvailable(extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
+           extensionAvailable(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
            extensionAvailable(extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
-           extensionAvailable(extensions, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
            extensionAvailable(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+}
+
+bool Context::supportsRayTracingPipeline(VkPhysicalDevice device,
+                                         const std::vector<VkExtensionProperties>& extensions) const
+{
+    return supportsRayQuery(device, extensions) &&
+           extensionAvailable(extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
 }
 
 void Context::pickPhysicalDevice()
@@ -140,7 +186,8 @@ void Context::pickPhysicalDevice()
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     if (deviceCount == 0)
     {
-        RT_FATAL("No Vulkan physical device found");
+        RT_LOG("No Vulkan physical device found");
+        return;
     }
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
@@ -148,12 +195,14 @@ void Context::pickPhysicalDevice()
 
     VkPhysicalDevice best = VK_NULL_HANDLE;
     int bestScore = -1;
+    bool bestPipeline = false;
 
     for (VkPhysicalDevice device : devices)
     {
-        if (!supportsRayTracing(device))
+        const std::vector<VkExtensionProperties> extensions = enumerateDeviceExtensions(device);
+        if (!supportsRayQuery(device, extensions))
         {
-            RT_LOG("Skipping device without ray tracing support");
+            RT_LOG("Skipping device without ray query support");
             continue;
         }
 
@@ -194,19 +243,28 @@ void Context::pickPhysicalDevice()
         {
             bestScore = score;
             best = device;
+            bestPipeline = supportsRayTracingPipeline(device, extensions);
         }
     }
 
     if (best == VK_NULL_HANDLE)
     {
-        RT_FATAL("No ray tracing capable physical device found");
+        RT_LOG("No ray query capable physical device found");
+        RT_LOG("Required: Vulkan 1.3, VK_KHR_acceleration_structure, VK_KHR_ray_query, "
+               "VK_KHR_deferred_host_operations, VK_KHR_swapchain");
+        return;
     }
 
     physicalDevice = best;
+    rayQuerySupported = true;
+    rayTracingPipelineSupported = bestPipeline;
 
     VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     props2.pNext = &asProps;
-    asProps.pNext = &rtProps;
+    if (rayTracingPipelineSupported)
+    {
+        asProps.pNext = &rtProps;
+    }
     vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
     props = props2.properties;
     apiVersion = VK_API_VERSION_1_3;
@@ -220,8 +278,8 @@ void Context::createDevice()
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, families.data());
 
     graphicsFamily = UINT32_MAX;
-    computeFamily = graphicsFamily;
-    transferFamily = graphicsFamily;
+    computeFamily = UINT32_MAX;
+    transferFamily = UINT32_MAX;
 
     for (uint32_t i = 0; i < queueFamilyCount; ++i)
     {
@@ -243,7 +301,8 @@ void Context::createDevice()
 
     if (graphicsFamily == UINT32_MAX)
     {
-        RT_FATAL("No graphics queue family");
+        RT_LOG("No graphics queue family");
+        return;
     }
     if (computeFamily == UINT32_MAX)
     {
@@ -270,7 +329,6 @@ void Context::createDevice()
     features12.bufferDeviceAddress = VK_TRUE;
     features12.scalarBlockLayout = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-    features12.hostQueryReset = VK_TRUE;
 
     VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     features13.dynamicRendering = VK_TRUE;
@@ -280,29 +338,33 @@ void Context::createDevice()
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     asFeatures.accelerationStructure = VK_TRUE;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    rayQueryFeatures.rayQuery = VK_TRUE;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeatures{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
     rtFeatures.rayTracingPipeline = VK_TRUE;
 
-    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
-    rayQueryFeatures.rayQuery = VK_TRUE;
-
     VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    features2.features.fragmentStoresAndAtomics = VK_TRUE;
     features2.pNext = &features12;
     features12.pNext = &features13;
     features13.pNext = &asFeatures;
-    asFeatures.pNext = &rtFeatures;
-    rtFeatures.pNext = &rayQueryFeatures;
+    asFeatures.pNext = &rayQueryFeatures;
+    if (rayTracingPipelineSupported)
+    {
+        rayQueryFeatures.pNext = &rtFeatures;
+    }
 
-    const std::vector<const char*> deviceExtensions = {
+    std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         VK_KHR_RAY_QUERY_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
     };
+    if (rayTracingPipelineSupported)
+    {
+        deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    }
 
     VkDeviceCreateInfo createInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     createInfo.pNext = &features2;
@@ -313,7 +375,9 @@ void Context::createDevice()
 
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS)
     {
-        RT_FATAL("vkCreateDevice failed");
+        RT_LOG("vkCreateDevice failed");
+        device = VK_NULL_HANDLE;
+        return;
     }
     volkLoadDevice(device);
 
@@ -334,13 +398,15 @@ void Context::createAllocator()
 
     if (vmaImportVulkanFunctionsFromVolk(&info, &functions) != VK_SUCCESS)
     {
-        RT_FATAL("vmaImportVulkanFunctionsFromVolk failed");
+        RT_LOG("vmaImportVulkanFunctionsFromVolk failed");
+        return;
     }
     info.pVulkanFunctions = &functions;
 
     if (vmaCreateAllocator(&info, &allocator) != VK_SUCCESS)
     {
-        RT_FATAL("vmaCreateAllocator failed");
+        RT_LOG("vmaCreateAllocator failed");
+        allocator = VK_NULL_HANDLE;
     }
 }
 
@@ -356,11 +422,7 @@ void Context::shutdown()
         vkDestroyDevice(device, nullptr);
         device = VK_NULL_HANDLE;
     }
-    if (surface != VK_NULL_HANDLE)
-    {
-        vkDestroySurfaceKHR(instance, surface, nullptr);
-        surface = VK_NULL_HANDLE;
-    }
+    destroySurface();
     if (debugMessenger != VK_NULL_HANDLE)
     {
         vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);

@@ -3,6 +3,7 @@
 #define TINYGLTF_IMPLEMENTATION
 #include <tiny_gltf.h>
 
+#include "common/Assets.h"
 #include "common/Log.h"
 #include "scene/TextureLoader.h"
 
@@ -11,7 +12,6 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <cmath>
-#include <filesystem>
 #include <functional>
 #include <map>
 #include <utility>
@@ -36,6 +36,59 @@ bool skipImageLoader(tinygltf::Image*, const int, std::string*, std::string*, in
 {
     // 图像由 stb_image 在 TextureLoader 中自行解码，这里只需让 tinygltf 跳过解码
     return true;
+}
+
+void setupAssetCallbacks(tinygltf::TinyGLTF& loader)
+{
+    tinygltf::FsCallbacks callbacks{};
+    callbacks.FileExists = [](const std::string& path, void*) { return assets::exists(path); };
+    callbacks.ExpandFilePath = [](const std::string& path, void*) { return path; };
+    callbacks.ReadWholeFile = [](std::vector<unsigned char>* out, std::string* err, const std::string& path,
+                                 void*) {
+        std::vector<uint8_t> data;
+        if (!assets::readFile(path, data))
+        {
+            if (err)
+            {
+                *err += "Failed to read asset: " + path;
+            }
+            return false;
+        }
+        out->assign(data.begin(), data.end());
+        return true;
+    };
+    callbacks.WriteWholeFile = [](std::string* err, const std::string&, const std::vector<unsigned char>&, void*) {
+        if (err)
+        {
+            *err += "Asset writing is not supported";
+        }
+        return false;
+    };
+    callbacks.GetFileSizeInBytes = [](size_t* fileSize, std::string* err, const std::string& path, void*) {
+        const size_t length = assets::size(path);
+        if (length == 0)
+        {
+            if (err)
+            {
+                *err += "Failed to stat asset: " + path;
+            }
+            return false;
+        }
+        *fileSize = length;
+        return true;
+    };
+
+    std::string error;
+    if (!loader.SetFsCallbacks(callbacks, &error))
+    {
+        RT_LOG("tinygltf SetFsCallbacks failed: %s", error.c_str());
+    }
+}
+
+std::string parentDirectory(const std::string& path)
+{
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
 }
 
 glm::mat4 nodeTransform(const tinygltf::Node& node)
@@ -81,10 +134,23 @@ bool loadGltfScene(const std::string& filename, Scene& out, std::string& error)
     tinygltf::Model model;
     std::string warn;
     loader.SetImageLoader(skipImageLoader, nullptr);
+    setupAssetCallbacks(loader);
 
+    std::vector<uint8_t> fileData;
+    if (!assets::readFile(filename, fileData))
+    {
+        error = "asset not found: " + filename;
+        return false;
+    }
+
+    const std::string baseDir = parentDirectory(filename);
     const bool isBinary = filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".glb") == 0;
-    const bool loaded = isBinary ? loader.LoadBinaryFromFile(&model, &error, &warn, filename)
-                                 : loader.LoadASCIIFromFile(&model, &error, &warn, filename);
+    const bool loaded =
+        isBinary ? loader.LoadBinaryFromMemory(&model, &error, &warn, fileData.data(),
+                                              static_cast<unsigned int>(fileData.size()), baseDir)
+                 : loader.LoadASCIIFromString(&model, &error, &warn,
+                                              reinterpret_cast<const char*>(fileData.data()),
+                                              static_cast<unsigned int>(fileData.size()), baseDir);
 
     if (!warn.empty())
     {
@@ -98,8 +164,6 @@ bool loadGltfScene(const std::string& filename, Scene& out, std::string& error)
         }
         return false;
     }
-
-    const std::filesystem::path baseDir = std::filesystem::path(filename).parent_path();
 
     // ---------------------------------------------------------------- textures
     std::map<std::pair<int, bool>, int> textureCache;
@@ -126,8 +190,12 @@ bool loadGltfScene(const std::string& filename, Scene& out, std::string& error)
         bool ok = false;
         if (!image.uri.empty() && image.uri.rfind("data:", 0) != 0)
         {
-            const std::filesystem::path path = baseDir / image.uri;
-            ok = loadTextureFile(path.string(), data, srgb);
+            const std::string imagePath = baseDir.empty() ? image.uri : baseDir + "/" + image.uri;
+            std::vector<uint8_t> bytes;
+            if (assets::readFile(imagePath, bytes))
+            {
+                ok = loadTextureMemory(bytes.data(), static_cast<int>(bytes.size()), data, srgb);
+            }
         }
         else if (!image.image.empty())
         {
