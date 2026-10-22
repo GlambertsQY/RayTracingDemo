@@ -303,8 +303,9 @@ void Application::updateScene(int sceneIndex)
         m_settings.fogDensity = 0.010f;
         m_settings.fogAlbedo = 0.88f;
         m_settings.fogAnisotropy = 0.55f;
-        m_settings.sunAzimuth = 25.0f;
-        m_settings.sunElevation = 32.0f;
+        // 低角度阳光：既穿过百叶形成条纹光柱，也让太阳盘从开放口露出（避开侧墙遮挡）
+        m_settings.sunAzimuth = 10.0f;
+        m_settings.sunElevation = 14.0f;
         m_settings.sunIntensity = 11.0f;
         m_settings.envIntensity = 0.12f;
         m_settings.fireflyClamp = 50.0f;
@@ -560,13 +561,16 @@ void Application::updateConstants()
 
     m_constants.exposure = m_settings.exposure;
     m_constants.envIntensity = m_settings.envIntensity;
-    m_constants.fireflyClamp = m_settings.fireflyClamp;
-    m_constants.paperWhiteNits = 203.0f;
+    // HDR 输出下放宽 firefly clamp，保留高动态范围的明亮高光
+    m_constants.fireflyClamp = m_swapchain.hdr() ? std::max(m_settings.fireflyClamp, 200.0f)
+                                                 : m_settings.fireflyClamp;
+    m_constants.paperWhiteNits = m_settings.paperWhiteNits;
     m_constants.hdrPeakNits = m_settings.hdrPeakNits;
     m_constants.fogDensity = m_settings.fogDensity;
     m_constants.fogAlbedo = m_settings.fogAlbedo;
     m_constants.fogAnisotropy = m_settings.fogAnisotropy;
     m_constants.fogDistance = m_fogDistance;
+    m_constants.bloomStrength = m_settings.bloomStrength;
 }
 
 bool Application::drawUI()
@@ -590,6 +594,10 @@ bool Application::drawUI()
     {
         m_settings.sceneIndex = sceneIndex;
         switchScene = true;
+    }
+    if (m_settings.sceneIndex == 3)
+    {
+        ImGui::TextDisabled("HDR reference bars (hanging board): 0.5x / 1x / 2x / 5x / 10x paper white");
     }
 
     if (m_rayTracer.backendAvailable(RayTracer::Backend::RayTracingPipeline) &&
@@ -621,6 +629,9 @@ bool Application::drawUI()
     ImGui::SliderFloat("Fog albedo", &m_settings.fogAlbedo, 0.1f, 1.0f, "%.2f");
     ImGui::SliderFloat("Fog anisotropy", &m_settings.fogAnisotropy, -0.9f, 0.9f, "%.2f");
 
+    ImGui::Separator();
+    ImGui::SliderFloat("Bloom", &m_settings.bloomStrength, 0.0f, 1.5f, "%.2f");
+
     if (m_platform->hdrOutputSupported())
     {
         if (ImGui::Checkbox("HDR output", &m_settings.hdrOutput))
@@ -630,6 +641,7 @@ bool Application::drawUI()
         if (m_swapchain.hdr())
         {
             ImGui::SliderFloat("HDR peak (nits)", &m_settings.hdrPeakNits, 400.0f, 4000.0f, "%.0f");
+            ImGui::SliderFloat("Paper white (nits)", &m_settings.paperWhiteNits, 80.0f, 400.0f, "%.0f");
         }
         else
         {
@@ -672,7 +684,7 @@ bool Application::drawUI()
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 460.0f, 16.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(440.0f, 380.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 420.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Statistics");
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameMs);
     ImGui::Text("Accumulated: %u samples", m_accumulatedFrames);
@@ -686,6 +698,10 @@ bool Application::drawUI()
     if (m_swapchain.hdr())
     {
         ImGui::Text("HDR: on (PQ, %.0f nits peak)", m_settings.hdrPeakNits);
+        if (m_hdrMaxCll > 0.0f)
+        {
+            ImGui::Text("CLL %.0f / FALL %.0f nits", m_hdrMaxCll, m_hdrMaxFall);
+        }
     }
     else
     {
@@ -852,6 +868,22 @@ void Application::tick(Platform& platform, const FrameInput& input)
         m_swapchain.present(m_context, m_context.graphicsQueue, m_renderFinished[imageIndex], imageIndex);
 
     vkWaitForFences(m_context.device, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
+
+    // HDR 内容亮度统计：把峰值/均值换算为 nits 并平滑后写入 MaxCLL / MaxFALL
+    if (m_swapchain.hdr())
+    {
+        float maxLuminance = 0.0f;
+        float averageLuminance = 0.0f;
+        if (m_rayTracer.readHdrStats(maxLuminance, averageLuminance) && maxLuminance > 0.0f)
+        {
+            const float paperWhite = std::max(m_settings.paperWhiteNits, 1.0f);
+            const float cll = std::clamp(maxLuminance * paperWhite, 1.0f, m_settings.hdrPeakNits);
+            const float fall = std::clamp(averageLuminance * paperWhite, 1.0f, m_settings.hdrPeakNits);
+            m_hdrMaxCll = m_hdrMaxCll > 0.0f ? m_hdrMaxCll * 0.7f + cll * 0.3f : cll;
+            m_hdrMaxFall = m_hdrMaxFall > 0.0f ? m_hdrMaxFall * 0.7f + fall * 0.3f : fall;
+            m_swapchain.setHdrContentStats(m_context, m_hdrMaxCll, m_hdrMaxFall);
+        }
+    }
 
 #ifdef RTDEMO_HAVE_RENDERDOC
     if (m_renderDocCaptureStarted && m_renderDoc)

@@ -1,0 +1,67 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "shared/common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 14) writeonly buffer HdrStats
+{
+    vec4 gHdrStats;   // x = 峰值亮度, y = 平均亮度, z = 采样数
+};
+
+shared float sMax[256];
+shared float sSum[256];
+shared uint  sCount[256];
+
+void main()
+{
+    const int tid = int(gl_LocalInvocationIndex);
+    const ivec2 size = imageSize(gAccumImage);
+    const ivec2 local = ivec2(gl_LocalInvocationID.xy);
+
+    float localMax = 0.0;
+    float localSum = 0.0;
+    uint localCount = 0u;
+    const int stride = 48;   // 16 线程 * 3，约 1/9 采样
+
+    for (int y = local.y; y < size.y; y += stride)
+    {
+        for (int x = local.x; x < size.x; x += stride)
+        {
+            const vec4 accum = imageLoad(gAccumImage, ivec2(x, y));
+            if (accum.a < 1.0)
+            {
+                continue;
+            }
+            const vec3 color = accum.rgb / accum.a * fc.exposure;
+            const float lum = max(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0);
+            localMax = max(localMax, lum);
+            localSum += lum;
+            ++localCount;
+        }
+    }
+
+    sMax[tid] = localMax;
+    sSum[tid] = localSum;
+    sCount[tid] = localCount;
+    barrier();
+
+    for (uint step = 128u; step > 0u; step >>= 1u)
+    {
+        if (tid < int(step))
+        {
+            sMax[tid] = max(sMax[tid], sMax[tid + int(step)]);
+            sSum[tid] += sSum[tid + int(step)];
+            sCount[tid] += sCount[tid + int(step)];
+        }
+        barrier();
+    }
+
+    if (tid == 0)
+    {
+        const float avg = sCount[0] > 0u ? sSum[0] / float(sCount[0]) : 0.0;
+        gHdrStats = vec4(sMax[0], avg, float(sCount[0]), 0.0);
+    }
+}

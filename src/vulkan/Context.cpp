@@ -360,6 +360,8 @@ void Context::createDevice()
     rtFeatures.rayTracingPipeline = VK_TRUE;
 
     VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    // tonemap 以 storage image 形式读取累积缓冲，需要片元阶段可写 storage
+    features2.features.fragmentStoresAndAtomics = VK_TRUE;
     features2.pNext = &features12;
     features12.pNext = &features13;
     features13.pNext = &asFeatures;

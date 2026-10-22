@@ -14,6 +14,8 @@ public:
     void recreate(Context& context, uint32_t width, uint32_t height, bool preferHdr = false);
     // 更新 HDR 内容峰值亮度（同时刷新交换链的 HDR metadata）
     void setHdrMetadata(Context& context, float maxLuminanceNits);
+    // 根据画面统计刷新 MaxCLL / MaxFALL（单位 nits）
+    void setHdrContentStats(Context& context, float maxCllNits, float maxFallNits);
     VkResult acquireNext(Context& context, VkSemaphore semaphore, uint32_t* imageIndex);
     VkResult present(Context& context, VkQueue queue, VkSemaphore waitSemaphore, uint32_t imageIndex);
 
@@ -35,4 +37,6 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     bool           m_hdr = false;
     float          m_hdrPeakNits = 1000.0f;
+    float          m_maxCllNits = 1000.0f;
+    float          m_maxFallNits = 400.0f;
 };

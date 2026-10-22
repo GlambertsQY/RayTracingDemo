@@ -95,6 +95,8 @@ private:
     std::chrono::steady_clock::time_point m_lastTime{};
     float m_fps = 0.0f;
     float m_frameMs = 0.0f;
+    float m_hdrMaxCll = 0.0f;
+    float m_hdrMaxFall = 0.0f;
 
     glm::vec3 m_lastCameraPos{0.0f};
     float m_lastFov = 0.9f;

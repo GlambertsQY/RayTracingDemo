@@ -546,6 +546,7 @@ Scene buildSunlitGalleryScene()
     const int matFloor = addMaterial({0.16f, 0.15f, 0.14f}, 0.20f, 0.35f);
     const int matWall = addMaterial({0.24f, 0.23f, 0.21f}, 0.85f);
     const int matColumn = addMaterial({0.52f, 0.49f, 0.45f}, 0.55f);
+    const int matBoard = addMaterial({0.02f, 0.02f, 0.02f}, 0.9f);
     const int matMetal = addMaterial({0.95f, 0.95f, 0.98f}, 0.08f, 1.0f);
     const int matCopper = addMaterial({0.95f, 0.55f, 0.32f}, 0.15f, 1.0f);
     const int matGlass = addMaterial({1.0f, 1.0f, 1.0f}, 0.0f, 0.0f, 1.0f);
@@ -554,6 +555,13 @@ Scene buildSunlitGalleryScene()
     const int matAccentCyan = addEmissiveMaterial({0.0f, 20.0f, 30.0f});
     const int matAccentMagenta = addEmissiveMaterial({30.0f, 4.0f, 20.0f});
     const int matSpotFixture = addEmissiveMaterial(glm::vec3(40.0f));
+    // HDR 亮度参考条：0.5× / 1× / 2× / 5× / 10× 纸白（场景线性亮度 1.0 = 纸白）
+    const float refLevels[5] = {0.5f, 1.0f, 2.0f, 5.0f, 10.0f};
+    int matReference[5];
+    for (int i = 0; i < 5; ++i)
+    {
+        matReference[i] = addEmissiveMaterial(glm::vec3(refLevels[i]));
+    }
 
     // --- 网格
     const int boxMesh = static_cast<int>(scene.meshes.size());
@@ -649,6 +657,18 @@ Scene buildSunlitGalleryScene()
     addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 6.6f, 2.0f)) *
                     glm::scale(glm::mat4(1.0f), glm::vec3(0.3f, 0.1f, 0.3f)),
                 boxMesh, matSpotFixture);
+
+    // 正对相机的悬挂亮度参考板：深色衬板 + 5 档发光方块（0.5/1/2/5/10 倍纸白）
+    addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(3.9f, 2.05f, 5.6f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(4.2f, 1.5f, 0.08f)),
+                boxMesh, matBoard);
+    for (int i = 0; i < 5; ++i)
+    {
+        const float x = 2.3f + 0.8f * static_cast<float>(i);
+        addInstance(glm::translate(glm::mat4(1.0f), glm::vec3(x, 2.05f, 5.53f)) *
+                        glm::scale(glm::mat4(1.0f), glm::vec3(0.55f, 0.55f, 0.06f)),
+                    boxMesh, matReference[i]);
+    }
 
     // --- 解析光源
     Light warmStrip;

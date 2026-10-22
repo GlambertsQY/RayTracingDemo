@@ -1,0 +1,55 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "shared/common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 12, rgba16f) uniform image2D gBloomImage;
+
+void main()
+{
+    const ivec2 dst = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 bloomSize = imageSize(gBloomImage);
+    if (dst.x >= bloomSize.x || dst.y >= bloomSize.y)
+    {
+        return;
+    }
+
+    // 4x4 降采样，避免高光闪烁
+    const ivec2 accumSize = imageSize(gAccumImage);
+    vec3 sum = vec3(0.0);
+    int count = 0;
+    for (int y = 0; y < 4; ++y)
+    {
+        for (int x = 0; x < 4; ++x)
+        {
+            const ivec2 p = dst * 4 + ivec2(x, y);
+            if (p.x >= accumSize.x || p.y >= accumSize.y)
+            {
+                continue;
+            }
+            const vec4 accum = imageLoad(gAccumImage, p);
+            if (accum.a <= 0.0)
+            {
+                continue;
+            }
+            sum += accum.rgb / accum.a;
+            ++count;
+        }
+    }
+
+    vec3 color = count > 0 ? sum / float(count) : vec3(0.0);
+    color *= fc.exposure;
+
+    // 软阈值：只保留纸白以上（场景值 > 1）的高光
+    const float threshold = 1.0;
+    const float knee = 0.5;
+    const float lum = max(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0);
+    const float soft = clamp(lum - threshold + knee, 0.0, 2.0 * knee);
+    const float contribution = max(soft * soft / (4.0 * knee + 1e-5), lum - threshold);
+    const vec3 bright = color * (contribution / max(lum, 1e-5));
+
+    imageStore(gBloomImage, dst, vec4(bright, 1.0));
+}

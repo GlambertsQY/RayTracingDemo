@@ -89,6 +89,10 @@ set(SHADER_FILES
   shadow.rahit
   shadow.rmiss
   accumulate.comp
+  bloom_bright.comp
+  bloom_blur_h.comp
+  bloom_blur_v.comp
+  hdr_stats.comp
   tonemap.vert
   tonemap.frag
   imgui_hdr.frag

@@ -4,6 +4,7 @@
 #include "vulkan/Context.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 void Swapchain::init(Context& context, uint32_t width, uint32_t height, bool preferHdr)
@@ -184,6 +185,23 @@ void Swapchain::setHdrMetadata(Context& context, float maxLuminanceNits)
     applyHdrMetadata(context);
 }
 
+void Swapchain::setHdrContentStats(Context& context, float maxCllNits, float maxFallNits)
+{
+    if (!m_hdr || m_swapchain == VK_NULL_HANDLE)
+    {
+        return;
+    }
+    const float cll = std::max(maxCllNits, 1.0f);
+    const float fall = std::max(maxFallNits, 1.0f);
+    if (std::abs(cll - m_maxCllNits) < 10.0f && std::abs(fall - m_maxFallNits) < 10.0f)
+    {
+        return;
+    }
+    m_maxCllNits = cll;
+    m_maxFallNits = fall;
+    applyHdrMetadata(context);
+}
+
 void Swapchain::applyHdrMetadata(Context& context)
 {
     if (!m_hdr || !context.hdrMetadataSupported || m_swapchain == VK_NULL_HANDLE)
@@ -198,10 +216,11 @@ void Swapchain::applyHdrMetadata(Context& context)
     metadata.whitePoint = {0.3127f, 0.3290f};
     metadata.maxLuminance = m_hdrPeakNits;
     metadata.minLuminance = 0.05f;
-    metadata.maxContentLightLevel = m_hdrPeakNits;
-    metadata.maxFrameAverageLightLevel = std::min(m_hdrPeakNits, 1000.0f);
+    metadata.maxContentLightLevel = std::min(m_maxCllNits, m_hdrPeakNits);
+    metadata.maxFrameAverageLightLevel = std::min(m_maxFallNits, metadata.maxContentLightLevel);
     vkSetHdrMetadataEXT(context.device, 1, &m_swapchain, &metadata);
-    RT_LOG("HDR metadata: peak %.0f nits", m_hdrPeakNits);
+    RT_LOG("HDR metadata: peak %.0f nits, MaxCLL %.0f, MaxFALL %.0f", m_hdrPeakNits, metadata.maxContentLightLevel,
+           metadata.maxFrameAverageLightLevel);
 }
 
 void Swapchain::recreate(Context& context, uint32_t width, uint32_t height, bool preferHdr)

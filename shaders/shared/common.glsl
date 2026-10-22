@@ -80,6 +80,7 @@ struct FrameConstants
     float fogAlbedo;        // 体积雾单次散射反照率
     float fogAnisotropy;    // HG 相函数各向异性
     float fogDistance;      // 有效雾深度（场景尺度）
+    float bloomStrength;    // bloom 叠加强度
 };
 
 layout(scalar, set = 0, binding = 1) uniform FrameConstantsBlock
@@ -268,7 +269,16 @@ vec3 skyRadiance(vec3 direction)
     }
     vec3 color = mix(ground, horizon, smoothstep(0.40, 0.52, y));
     color = mix(color, zenith, smoothstep(0.52, 0.95, y));
-    return color * fc.envIntensity;
+    color *= fc.envIntensity;
+
+    // 太阳盘与光晕：保证画面中存在真正的峰值像素（配合 bloom 产生眩光）
+    const vec3 sunDir = normalize(fc.sunDir.xyz);
+    const float cosSun = clamp(dot(direction, sunDir), -1.0, 1.0);
+    const float disk = smoothstep(0.99975, 0.99992, cosSun);
+    const float glow = 0.20 * pow(max(cosSun, 0.0), 2048.0) + 0.04 * pow(max(cosSun, 0.0), 64.0);
+    color += (disk * 20.0 + glow) * fc.sunColor.rgb * fc.sunColor.w;
+
+    return color;
 }
 
 float fresnelDielectric(float cosTheta, float ior)

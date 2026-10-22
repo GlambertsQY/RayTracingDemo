@@ -70,8 +70,8 @@ void RayTracer::init(Context& context, Resources& resources, VkFormat colorForma
     }
 #endif
 
-    VkDescriptorSetLayoutBinding bindings[11]{};
-    for (uint32_t i = 0; i < 11; ++i)
+    VkDescriptorSetLayoutBinding bindings[15]{};
+    for (uint32_t i = 0; i < 15; ++i)
     {
         bindings[i].binding = i;
         bindings[i].descriptorCount = 1;
@@ -97,9 +97,17 @@ void RayTracer::init(Context& context, Resources& resources, VkFormat colorForma
     bindings[9].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
     bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[11].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[14].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 11;
+    layoutInfo.bindingCount = 15;
     layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(context.device, &layoutInfo, nullptr, &m_setLayout) != VK_SUCCESS)
     {
@@ -117,6 +125,13 @@ void RayTracer::init(Context& context, Resources& resources, VkFormat colorForma
     const VkDeviceSize constantSize = sizeof(FrameConstants);
     m_constants = resources.createBuffer(constantSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                          VMA_MEMORY_USAGE_CPU_TO_GPU, true);
+
+    m_hdrStats = resources.createBuffer(sizeof(float) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                        VMA_MEMORY_USAGE_CPU_ONLY, true);
+    if (m_hdrStats.mapped)
+    {
+        std::memset(m_hdrStats.mapped, 0, sizeof(float) * 4);
+    }
 
     createPipelines(colorFormat);
 }
@@ -258,7 +273,55 @@ void RayTracer::createPipelines(VkFormat colorFormat)
     // ---------------------------------------------------------------- tonemap
     createTonemapPipeline(colorFormat);
 
+    createBloomPipelines();
+
     RT_LOG("Ray tracing backend: %s", backendName());
+}
+
+VkPipeline RayTracer::createComputePipeline(const char* shaderName)
+{
+    VkDevice device = m_context->device;
+    VkShaderModule module = loadShader(shaderName);
+
+    VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = module;
+    stage.pName = "main";
+
+    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = stage;
+    info.layout = m_pipelineLayout;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS)
+    {
+        RT_FATAL("Failed to create compute pipeline: %s", shaderName);
+    }
+    vkDestroyShaderModule(device, module, nullptr);
+    return pipeline;
+}
+
+void RayTracer::createBloomPipelines()
+{
+    m_bloomBrightPipeline = createComputePipeline("bloom_bright.comp.spv");
+    m_bloomBlurHPipeline = createComputePipeline("bloom_blur_h.comp.spv");
+    m_bloomBlurVPipeline = createComputePipeline("bloom_blur_v.comp.spv");
+    m_hdrStatsPipeline = createComputePipeline("hdr_stats.comp.spv");
+}
+
+bool RayTracer::readHdrStats(float& maxLuminance, float& averageLuminance)
+{
+    if (!m_statsPending || m_hdrStats.mapped == nullptr)
+    {
+        return false;
+    }
+    m_statsPending = false;
+
+    vmaInvalidateAllocation(m_context->allocator, m_hdrStats.allocation, 0, VK_WHOLE_SIZE);
+    const auto* stats = static_cast<const float*>(m_hdrStats.mapped);
+    maxLuminance = stats[0];
+    averageLuminance = stats[1];
+    return true;
 }
 
 void RayTracer::createTonemapPipeline(VkFormat colorFormat)
@@ -403,6 +466,8 @@ void RayTracer::createSizeImages(VkExtent2D extent)
 {
     m_resources->destroyImage(m_radiance);
     m_resources->destroyImage(m_accum);
+    m_resources->destroyImage(m_bloomA);
+    m_resources->destroyImage(m_bloomB);
 
     m_radiance = m_resources->createImage2D(VK_FORMAT_R16G16B16A16_SFLOAT, extent,
                                             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -411,9 +476,26 @@ void RayTracer::createSizeImages(VkExtent2D extent)
                                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                              VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
+    // bloom 使用 1/4 分辨率，降低移动端开销
+    const VkExtent2D bloomExtent{std::max(extent.width / 4, 1u), std::max(extent.height / 4, 1u)};
+    m_bloomA = m_resources->createImage2D(VK_FORMAT_R16G16B16A16_SFLOAT, bloomExtent,
+                                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                              VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    m_bloomB = m_resources->createImage2D(VK_FORMAT_R16G16B16A16_SFLOAT, bloomExtent,
+                                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                              VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+
     m_resources->immediate([&](VkCommandBuffer cmd) {
         transitionImage(cmd, m_radiance.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         transitionImage(cmd, m_accum.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        transitionImage(cmd, m_bloomA.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        transitionImage(cmd, m_bloomB.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const VkClearColorValue zero{};
+        // 避免未初始化内容在下采样缺失时被采样（NaN * 0 仍为 NaN）
+        vkCmdClearColorImage(cmd, m_bloomA.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+        vkCmdClearColorImage(cmd, m_bloomB.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     });
 
     m_extent = extent;
@@ -431,9 +513,9 @@ void RayTracer::createDescriptors(const GpuScene& scene)
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTextureCount + 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4},
     };
 
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -483,9 +565,13 @@ void RayTracer::createDescriptors(const GpuScene& scene)
 
     VkDescriptorImageInfo radianceInfo{VK_NULL_HANDLE, m_radiance.view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo accumInfo{VK_NULL_HANDLE, m_accum.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo bloomSampleInfo{scene.sampler, m_bloomA.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo bloomAInfo{VK_NULL_HANDLE, m_bloomA.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo bloomBInfo{VK_NULL_HANDLE, m_bloomB.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo statsInfo{m_hdrStats.buffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet writes[11]{};
-    for (uint32_t i = 0; i < 11; ++i)
+    VkWriteDescriptorSet writes[15]{};
+    for (uint32_t i = 0; i < 15; ++i)
     {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = m_set;
@@ -515,7 +601,19 @@ void RayTracer::createDescriptors(const GpuScene& scene)
     writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[10].pImageInfo = &accumInfo;
 
-    vkUpdateDescriptorSets(m_context->device, 11, writes, 0, nullptr);
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[11].pImageInfo = &bloomSampleInfo;
+
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[12].pImageInfo = &bloomAInfo;
+
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[13].pImageInfo = &bloomBInfo;
+
+    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[14].pBufferInfo = &statsInfo;
+
+    vkUpdateDescriptorSets(m_context->device, 15, writes, 0, nullptr);
     m_sceneBound = true;
 }
 
@@ -617,6 +715,52 @@ void RayTracer::render(VkCommandBuffer cmd, const FrameConstants& constants, boo
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
     vkCmdDispatch(cmd, (m_extent.width + 7) / 8, (m_extent.height + 7) / 8, 1);
 
+    // ------------------------------------------------- bloom（亮部提取 + 两轮可分离高斯）
+    const bool bloomEnabled = constants.bloomStrength > 0.001f && m_bloomA.image != VK_NULL_HANDLE &&
+                              m_bloomB.image != VK_NULL_HANDLE;
+    if (bloomEnabled)
+    {
+        const VkExtent2D bloomExtent = m_bloomA.extent;
+        const uint32_t bloomGroupsX = (bloomExtent.width + 7) / 8;
+        const uint32_t bloomGroupsY = (bloomExtent.height + 7) / 8;
+
+        auto computeBarrier = [&]() {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &barrier, 0, nullptr, 0, nullptr);
+        };
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_bloomBrightPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
+        vkCmdDispatch(cmd, bloomGroupsX, bloomGroupsY, 1);
+        computeBarrier();
+
+        for (int round = 0; round < 2; ++round)
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_bloomBlurHPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
+            vkCmdDispatch(cmd, bloomGroupsX, bloomGroupsY, 1);
+            computeBarrier();
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_bloomBlurVPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
+            vkCmdDispatch(cmd, bloomGroupsX, bloomGroupsY, 1);
+            computeBarrier();
+        }
+    }
+
+    // --------------------------------------------------------- HDR 亮度统计（每 30 帧一次）
+    if ((constants.flags & 1u) != 0u && (m_frameCounter % 30u) == 0u)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_hdrStatsPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &m_set, 0, nullptr);
+        vkCmdDispatch(cmd, (m_extent.width + 15) / 16, (m_extent.height + 15) / 16, 1);
+        m_statsPending = true;
+    }
+    ++m_frameCounter;
+
     {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -692,6 +836,15 @@ void RayTracer::shutdown()
         vkDestroyPipeline(device, m_tonemapPipeline, nullptr);
         m_tonemapPipeline = VK_NULL_HANDLE;
     }
+    for (VkPipeline* pipeline : {&m_bloomBrightPipeline, &m_bloomBlurHPipeline, &m_bloomBlurVPipeline,
+                                 &m_hdrStatsPipeline})
+    {
+        if (*pipeline != VK_NULL_HANDLE)
+        {
+            vkDestroyPipeline(device, *pipeline, nullptr);
+            *pipeline = VK_NULL_HANDLE;
+        }
+    }
     if (m_pipelineLayout != VK_NULL_HANDLE)
     {
         vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
@@ -711,8 +864,11 @@ void RayTracer::shutdown()
 
     m_resources->destroyBuffer(m_sbt);
     m_resources->destroyBuffer(m_constants);
+    m_resources->destroyBuffer(m_hdrStats);
     m_resources->destroyImage(m_radiance);
     m_resources->destroyImage(m_accum);
+    m_resources->destroyImage(m_bloomA);
+    m_resources->destroyImage(m_bloomB);
 
     m_context = nullptr;
     m_resources = nullptr;

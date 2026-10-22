@@ -32,6 +32,7 @@ struct FrameConstants
     float     fogAlbedo;           // 体积雾单次散射反照率
     float     fogAnisotropy;       // HG 相函数各向异性
     float     fogDistance;         // 有效雾深度（场景尺度）
+    float     bloomStrength;       // bloom 叠加强度
 };
 
 static_assert(offsetof(FrameConstants, outputResolution) == 144, "FrameConstants layout mismatch");
@@ -42,6 +43,7 @@ static_assert(offsetof(FrameConstants, fogDensity) == 164, "FrameConstants layou
 static_assert(offsetof(FrameConstants, fogAlbedo) == 168, "FrameConstants layout mismatch");
 static_assert(offsetof(FrameConstants, fogAnisotropy) == 172, "FrameConstants layout mismatch");
 static_assert(offsetof(FrameConstants, fogDistance) == 176, "FrameConstants layout mismatch");
+static_assert(offsetof(FrameConstants, bloomStrength) == 180, "FrameConstants layout mismatch");
 
 struct GpuMaterial
 {
@@ -97,6 +99,8 @@ struct Settings
     float fogDensity     = 0.0f;
     float fogAlbedo      = 0.95f;
     float fogAnisotropy  = 0.6f;
+    float bloomStrength  = 0.35f;
+    float paperWhiteNits = 203.0f;
     bool  hdrOutput      = false;
     float hdrPeakNits    = 1000.0f;
     bool  showUI         = true;

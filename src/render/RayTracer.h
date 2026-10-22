@@ -33,6 +33,9 @@ public:
     bool backendAvailable(Backend backend) const;
     const char* backendName() const;
 
+    // 读取 HDR 统计（帧结束后调用）：峰值/平均亮度（场景线性单位，已含曝光）
+    bool readHdrStats(float& maxLuminance, float& averageLuminance);
+
     VkImage   accumImage() const { return m_accum.image; }
     VkExtent2D extent() const { return m_extent; }
     VkExtent2D outputExtent() const { return m_outputExtent; }
@@ -42,6 +45,8 @@ private:
     void createSizeImages(VkExtent2D extent);
     void createPipelines(VkFormat colorFormat);
     void createTonemapPipeline(VkFormat colorFormat);
+    void createBloomPipelines();
+    VkPipeline createComputePipeline(const char* shaderName);
     void createSBT();
 
     VkShaderModule loadShader(const char* name) const;
@@ -58,11 +63,21 @@ private:
     VkPipeline m_rayQueryPipeline = VK_NULL_HANDLE;
     VkPipeline m_accumulatePipeline = VK_NULL_HANDLE;
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
+    VkPipeline m_bloomBrightPipeline = VK_NULL_HANDLE;
+    VkPipeline m_bloomBlurHPipeline = VK_NULL_HANDLE;
+    VkPipeline m_bloomBlurVPipeline = VK_NULL_HANDLE;
+    VkPipeline m_hdrStatsPipeline = VK_NULL_HANDLE;
 
     Buffer m_sbt;
     Buffer m_constants;
+    Buffer m_hdrStats;
     Image  m_radiance;
     Image  m_accum;
+    Image  m_bloomA;
+    Image  m_bloomB;
+
+    uint32_t m_frameCounter = 0;
+    bool     m_statsPending = false;
 
     VkStridedDeviceAddressRegionKHR m_raygenRegion{};
     VkStridedDeviceAddressRegionKHR m_missRegion{};
