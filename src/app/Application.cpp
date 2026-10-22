@@ -534,7 +534,13 @@ void Application::updateConstants()
     m_constants.frameIndex = m_accumulatedFrames;
     m_constants.maxBounces = static_cast<uint32_t>(std::max(m_settings.maxBounces, 1));
     m_constants.neeBounces = static_cast<uint32_t>(std::clamp(m_settings.neeBounces, 0, m_settings.maxBounces));
-    m_constants.samplesPerFrame = static_cast<uint32_t>(std::max(m_settings.samplesPerFrame, 1));
+    // 画面静止后自动提高每帧样本数，加快收敛（不影响移动时的帧率）
+    uint32_t samplesPerFrame = static_cast<uint32_t>(std::max(m_settings.samplesPerFrame, 1));
+    if (m_staticFrames >= 2)
+    {
+        samplesPerFrame = std::max(samplesPerFrame, 3u);
+    }
+    m_constants.samplesPerFrame = samplesPerFrame;
     m_constants.lightCount = m_gpuScene.lightCount;
     m_constants.flags = (m_swapchain.hdr() ? 1u : 0u) | (m_activeScene == 2 ? 2u : 0u);
     m_constants.fov = m_camera.fovY;
@@ -817,6 +823,9 @@ void Application::tick(Platform& platform, const FrameInput& input)
         m_rayTracer.setScene(m_gpuScene, {m_renderWidth, m_renderHeight}, m_swapchain.extent);
         m_resetAccumulation = true;
     }
+
+    // 连续静止帧计数：用于在画面稳定后自动提高每帧采样数
+    m_staticFrames = m_resetAccumulation ? 0 : (m_staticFrames + 1);
 
     m_camera.aspect =
         static_cast<float>(m_swapchain.extent.width) / static_cast<float>(std::max(m_swapchain.extent.height, 1u));

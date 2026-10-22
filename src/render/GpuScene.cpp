@@ -113,6 +113,7 @@ void GpuScene::create(Context& context, Resources& resources, const Scene& scene
 
     std::vector<GpuLight> gpuLights;
     gpuLights.reserve(scene.lights.size());
+    float totalPower = 0.0f;
     for (const Light& light : scene.lights)
     {
         GpuLight g{};
@@ -120,7 +121,37 @@ void GpuScene::create(Context& context, Resources& resources, const Scene& scene
         g.emission = glm::vec4(light.emission, light.radius);
         g.u = glm::vec4(light.u, light.innerCos);
         g.v = glm::vec4(light.v, light.outerCos);
+
+        // 光源重要度采样权重：亮度 × 有效面积（聚光灯用发光强度近似）
+        const float radiance = std::max({light.emission.r, light.emission.g, light.emission.b});
+        float area = 1.0f;
+        if (light.type == 0)
+        {
+            area = 4.0f * glm::length(glm::cross(light.u, light.v));
+        }
+        else if (light.type == 1)
+        {
+            area = 4.0f * 3.14159265f * light.radius * light.radius;
+        }
+        else
+        {
+            area = 3.14159265f;
+        }
+        const float power = std::max(radiance * area, 1e-4f);
+        g.sampling = glm::vec4(0.0f, power, 0.0f, 0.0f);
+        totalPower += power;
         gpuLights.push_back(g);
+    }
+
+    // 归一化为 CDF 上界，shader 内可直接线性搜索
+    if (totalPower > 0.0f)
+    {
+        float accumulated = 0.0f;
+        for (GpuLight& g : gpuLights)
+        {
+            accumulated += g.sampling.y;
+            g.sampling.x = accumulated / totalPower;
+        }
     }
     lightCount = static_cast<uint32_t>(gpuLights.size());
     if (gpuLights.empty())

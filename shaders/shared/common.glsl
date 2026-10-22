@@ -47,10 +47,11 @@ struct GpuInstance
 
 struct GpuLight
 {
-    vec4 position;      // xyz = 中心, w = 类型 (0 = 矩形, 1 = 球)
+    vec4 position;      // xyz = 中心, w = 类型 (0 = 矩形, 1 = 球, 2 = 聚光灯)
     vec4 emission;      // rgb = 辐射亮度, w = 半径
     vec4 u;
     vec4 v;
+    vec4 sampling;      // x = 归一化 CDF 上界, y = 相对功率
 };
 
 struct FrameConstants
@@ -160,6 +161,15 @@ void seedRng(uvec3 launch, uint sampleIndex)
     gSeed = pcgHash(launch.x + launch.y * 1973u + launch.z * 9277u + fc.frameIndex * 26699u +
                     sampleIndex * 5783u + 1u);
     rand();
+}
+
+// R2 低差异序列 + 每像素随机旋转：比纯白噪声抖动有更均匀的采样分布
+vec2 lowDiscrepancyJitter(uvec2 pixel, uint sampleIndex)
+{
+    const vec2 g = vec2(0.7548776662466927, 0.5698402909980532);
+    const float offsetX = float(pcgHash(pixel.x * 1973u + pixel.y * 9277u)) * (1.0 / 4294967296.0);
+    const float offsetY = float(pcgHash(pixel.x * 26699u + pixel.y * 5783u)) * (1.0 / 4294967296.0);
+    return fract(g * float(sampleIndex % 4096u) + vec2(offsetX, offsetY));
 }
 
 vec3 randomUnitVector()

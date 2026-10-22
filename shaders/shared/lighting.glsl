@@ -17,6 +17,25 @@ struct LightSample
     bool  valid;
 };
 
+// 按功率 CDF 选灯（光源重要度采样），返回归一化 pdf（概率，非密度）
+int pickLight(float u, out float pdf)
+{
+    const int lightCount = int(fc.lightCount);
+    int index = lightCount - 1;
+    for (int i = 0; i < lightCount; ++i)
+    {
+        if (u <= gLights[i].sampling.x)
+        {
+            index = i;
+            break;
+        }
+    }
+    const float upper = gLights[index].sampling.x;
+    const float lower = index > 0 ? gLights[index - 1].sampling.x : 0.0;
+    pdf = max(upper - lower, 1e-4);
+    return index;
+}
+
 LightSample sampleLight(const GpuLight light, vec3 referencePos)
 {
     LightSample ls;
@@ -107,10 +126,12 @@ vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
     }
 
     const int lightCount = int(fc.lightCount);
-    if (lightCount > 0)
+    // 光源重要度采样：按功率 CDF 分层取 2 盏，各自按 1/(2*pdf) 补偿
+    const int kLightSamples = min(lightCount, 2);
+    for (int s = 0; s < kLightSamples; ++s)
     {
-        // 均匀随机选择一盏灯，乘以灯数作为 pdf 补偿；移动端避免每跳遍历所有灯
-        const int lightIndex = min(int(rand() * float(lightCount)), lightCount - 1);
+        float pdf = 0.0;
+        const int lightIndex = pickLight((float(s) + rand()) / float(kLightSamples), pdf);
         const GpuLight light = gLights[lightIndex];
         const LightSample ls = sampleLight(light, hitPos);
 
@@ -119,7 +140,7 @@ vec3 explicitLighting(vec3 hitPos, vec3 normal, vec3 diffuseAlbedo)
             !traceOcclusion(hitPos + normal * 0.005, ls.toLight, max(ls.distance - 0.01, 0.001)))
         {
             result += diffuseAlbedo * kInvPi * light.emission.rgb * surfaceCos * ls.geometryFactor /
-                      ls.distanceSquared * float(lightCount) * fogTransmittance(ls.distance);
+                      ls.distanceSquared * (1.0 / (pdf * float(kLightSamples))) * fogTransmittance(ls.distance);
         }
     }
 
@@ -145,7 +166,8 @@ vec3 fogLighting(vec3 position, vec3 direction)
     const int lightCount = int(fc.lightCount);
     if (lightCount > 0)
     {
-        const int lightIndex = min(int(rand() * float(lightCount)), lightCount - 1);
+        float pdf = 0.0;
+        const int lightIndex = pickLight(rand(), pdf);
         const GpuLight light = gLights[lightIndex];
         const LightSample ls = sampleLight(light, position);
 
@@ -153,11 +175,36 @@ vec3 fogLighting(vec3 position, vec3 direction)
         {
             const float phase = hgPhase(dot(direction, ls.toLight), g);
             result += phase * light.emission.rgb * ls.geometryFactor / ls.distanceSquared *
-                      float(lightCount) * fogTransmittance(ls.distance);
+                      (1.0 / pdf) * fogTransmittance(ls.distance);
         }
     }
 
     return result;
+}
+
+// 沿射线的单次散射积分（等距中点法）：相比随机散射点可消除逐帧闪烁
+vec3 fogInscattering(vec3 origin, vec3 direction, float maxDistance)
+{
+    const float sigmaT = fogSigmaT();
+    if (sigmaT <= 1e-6)
+    {
+        return vec3(0.0);
+    }
+    const float distance = min(maxDistance, fc.fogDistance);
+    if (!(distance > 0.0))
+    {
+        return vec3(0.0);
+    }
+
+    const int kSteps = 3;
+    const float step = distance / float(kSteps);
+    vec3 result = vec3(0.0);
+    for (int i = 0; i < kSteps; ++i)
+    {
+        const float t = (float(i) + 0.5) * step;
+        result += exp(-sigmaT * t) * fogLighting(origin + direction * t, direction) * step;
+    }
+    return result * fogSigmaS();
 }
 
 #endif // RT_LIGHTING_GLSL

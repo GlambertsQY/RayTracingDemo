@@ -88,6 +88,7 @@ private:
 
     FrameConstants m_constants{};
     uint32_t m_accumulatedFrames = 0;
+    uint32_t m_staticFrames = 0;
     bool m_resetAccumulation = true;
     bool m_sceneChanged = false;
 

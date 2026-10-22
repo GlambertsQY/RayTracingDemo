@@ -77,10 +77,11 @@ struct GpuInstance
 
 struct GpuLight
 {
-    glm::vec4 position;        // xyz = 中心, w = 类型 (0 = 矩形, 1 = 球)
+    glm::vec4 position;        // xyz = 中心, w = 类型 (0 = 矩形, 1 = 球, 2 = 聚光灯)
     glm::vec4 emission;        // rgb = 辐射亮度, w = 半径
-    glm::vec4 u;               // 矩形半轴 u
+    glm::vec4 u;               // 矩形半轴 u / 聚光灯方向
     glm::vec4 v;               // 矩形半轴 v
+    glm::vec4 sampling;        // x = 归一化 CDF 上界, y = 相对功率（供光源重要度采样）
 };
 
 struct Settings

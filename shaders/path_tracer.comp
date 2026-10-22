@@ -111,7 +111,8 @@ void main()
     {
         seedRng(gl_GlobalInvocationID, uint(sampleIndex));
 
-        const vec2 jitter = vec2(rand(), rand());
+        const uint globalSample = fc.frameIndex * uint(sampleCount) + uint(sampleIndex);
+        const vec2 jitter = lowDiscrepancyJitter(uvec2(pixel), globalSample);
         vec2 ndc = ((vec2(pixel) + jitter) / fc.resolution) * 2.0 - 1.0;
         ndc.y = -ndc.y;
 
@@ -130,36 +131,14 @@ void main()
         {
             const PathHit hit = tracePrimary(origin, direction);
 
-            // 体积雾：按指数分布采样散射距离，与最近表面距离比较（关闭时整段跳过）
+            // 体积雾：沿主射线做等距单次散射积分，其余弹射只做透射衰减（间接雾贡献远小于直接可见雾）
             const float surfaceDistance = hit.hit ? hit.t : fc.fogDistance;
             const float sigmaT = fc.fogDensity;
             if (sigmaT > 1e-6)
             {
-                const float mediumDistance = -log(max(1.0 - rand(), 1e-6)) / sigmaT;
-                if (mediumDistance < surfaceDistance)
+                if (bounce == 0)
                 {
-                    const vec3 scatterPosition = origin + direction * mediumDistance;
-                    radiance += throughput * fogLighting(scatterPosition, direction);
-
-                    throughput *= fogSigmaS() / sigmaT;
-                    direction = sampleHgDirection(direction, clamp(fc.fogAnisotropy, -0.95, 0.95));
-                    origin = scatterPosition;
-
-                    if (!isFiniteVec(direction) || dot(direction, direction) < 1e-8)
-                    {
-                        break;
-                    }
-                    if (bounce >= 3)
-                    {
-                        const float survival =
-                            clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
-                        if (rand() > survival)
-                        {
-                            break;
-                        }
-                        throughput /= survival;
-                    }
-                    continue;
+                    radiance += throughput * fogInscattering(origin, direction, surfaceDistance);
                 }
                 throughput *= exp(-sigmaT * surfaceDistance);
             }
